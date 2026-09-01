@@ -1,0 +1,10 @@
+# Build & temporary artifacts
+*.har
+*.log
+*.bak
+*.tmp
+scratch/
+extracted/
+extracted_2/
+.vscode/
+.idea/

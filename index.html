@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <title>GTA III</title>
+  <link rel="icon" href="data:,">
+  <script>
+    (function () {
+      const logQueue = [];
+      let flushTimer = null;
+      function flushLogs() {
+        if (!logQueue.length) return;
+        const batch = logQueue.splice(0, logQueue.length);
+        fetch('/log', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(batch),
+          keepalive: true
+        }).catch(function () {});
+      }
+      function queueLog(level, tag, msg) {
+        const s = String(msg);
+        // Avoid flooding HTTP sockets on high-frequency intermediate chunk progress
+        if (tag === 'CONSOLE' && s.includes('status: Assets:') && s.includes('MB)')) return;
+        if (tag === 'NET' && s.includes('/log')) return;
+        logQueue.push({ level: level, tag: tag, msg: s });
+        if (level === 'ERROR' || level === 'WARN') {
+          flushLogs();
+        } else if (logQueue.length >= 50) {
+          flushLogs();
+        } else if (!flushTimer) {
+          flushTimer = setTimeout(function () {
+            flushTimer = null;
+            flushLogs();
+          }, 250);
+        }
+      }
+      window.remoteLog = queueLog;
+
+      // Intercept window errors & unhandled promise rejections
+      window.addEventListener('error', function (e) {
+        const msg = (e.error && e.error.stack) ? e.error.stack : (e.message || String(e));
+        queueLog('ERROR', 'WINDOW', msg);
+      });
+      window.addEventListener('unhandledrejection', function (e) {
+        const reason = (e.reason && e.reason.stack) ? e.reason.stack : String(e.reason);
+        queueLog('ERROR', 'PROMISE', reason);
+      });
+
+      // Intercept console functions
+      const origLog = console.log, origWarn = console.warn, origErr = console.error, origInfo = console.info, origDbg = console.debug;
+      console.log = function () {
+        origLog.apply(console, arguments);
+        const text = Array.from(arguments).map(String).join(' ');
+        queueLog('INFO', 'CONSOLE', text);
+      };
+      console.info = function () {
+        origInfo.apply(console, arguments);
+        const text = Array.from(arguments).map(String).join(' ');
+        queueLog('INFO', 'CONSOLE', text);
+      };
+      console.warn = function () {
+        origWarn.apply(console, arguments);
+        const text = Array.from(arguments).map(String).join(' ');
+        queueLog('WARN', 'CONSOLE', text);
+      };
+      console.error = function () {
+        origErr.apply(console, arguments);
+        const text = Array.from(arguments).map(String).join(' ');
+        queueLog('ERROR', 'CONSOLE', text);
+      };
+      if (origDbg) {
+        console.debug = function () {
+          origDbg.apply(console, arguments);
+          const text = Array.from(arguments).map(String).join(' ');
+          queueLog('DEBUG', 'CONSOLE', text);
+        };
+      }
+
+      // Intercept user inputs (keyboard, mouse, pointer, touch)
+      window.addEventListener('keydown', function (e) {
+        queueLog('INFO', 'INPUT', 'keydown: code=' + e.code + ' key=' + e.key + ' target=' + (e.target ? e.target.tagName : 'null'));
+      }, true);
+      window.addEventListener('pointerdown', function (e) {
+        queueLog('INFO', 'INPUT', 'pointerdown: button=' + e.button + ' target=' + (e.target ? e.target.tagName : 'null') + ' isTrusted=' + e.isTrusted);
+      }, true);
+      window.addEventListener('mousedown', function (e) {
+        queueLog('INFO', 'INPUT', 'mousedown: button=' + e.button + ' target=' + (e.target ? e.target.tagName : 'null') + ' isTrusted=' + e.isTrusted);
+      }, true);
+      window.addEventListener('touchstart', function (e) {
+        queueLog('INFO', 'INPUT', 'touchstart: touches=' + e.touches.length + ' isTrusted=' + e.isTrusted);
+      }, true);
+
+      // Intercept network fetch for asset diagnostics
+      const origFetch = window.fetch;
+      window.fetch = function (input, init) {
+        const url = typeof input === 'string' ? input : (input && input.url ? input.url : String(input));
+        const isLog = url.includes('/log');
+        const t0 = performance.now();
+        return origFetch.apply(this, arguments).then(function (res) {
+          if (!isLog) {
+            const dt = (performance.now() - t0).toFixed(1);
+            if (!res.ok) {
+              queueLog('WARN', 'NET', 'fetch FAIL (' + res.status + '): ' + url + ' (' + dt + 'ms)');
+            }
+          }
+          return res;
+        }).catch(function (err) {
+          if (!isLog) {
+            queueLog('ERROR', 'NET', 'fetch ERR: ' + url + ' - ' + (err.message || String(err)));
+          }
+          throw err;
+        });
+      };
+
+      queueLog('INFO', 'INIT', 'Omniscient client logger initialized on ' + window.location.href);
+      window.addEventListener('pagehide', flushLogs);
+      window.addEventListener('beforeunload', flushLogs);
+    })();
+  </script>
+  <!-- Оверлей тач-управления: генерируется tools/build_touch_css.py. -->
+  <link rel="stylesheet" href="touch.css?v=139">
+  <style>
+    html, body {
+      margin: 0;
+      height: 100%;
+      background: #08080a;
+      color: #e2e8f0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      overflow: hidden;
+      user-select: none;
+    }
+    #wrap {
+      width: 100vw;
+      height: 100vh;
+      display: grid;
+      place-items: center;
+      position: absolute;
+      inset: 0;
+      z-index: 1;
+    }
+    canvas {
+      width: 100vw;
+      height: 100vh;
+      display: block;
+      background: #000;
+      touch-action: none;
+      outline: none;
+    }
+
+    /* Premium GTA III Loading Overlay */
+    #loader-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 100;
+      background: radial-gradient(circle at 50% 40%, rgba(20, 24, 38, 0.95), rgba(8, 10, 15, 0.98) 75%, #050608 100%);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      box-sizing: border-box;
+      transition: opacity 0.5s cubic-bezier(0.4, 0, 0.2, 1), visibility 0.5s ease;
+      backdrop-filter: blur(8px);
+    }
+    #loader-overlay.hidden {
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+    }
+    .loader-card {
+      width: min(520px, 92vw);
+      background: rgba(18, 22, 34, 0.75);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 16px;
+      padding: 32px 28px;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.7), 0 0 40px rgba(56, 189, 248, 0.08);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      text-align: center;
+    }
+    .gta-title {
+      font-size: 28px;
+      font-weight: 900;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      background: linear-gradient(135deg, #ffffff 0%, #cbd5e1 50%, #94a3b8 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      margin: 0 0 4px 0;
+      text-shadow: 0 2px 20px rgba(255,255,255,0.2);
+    }
+    .gta-subtitle {
+      font-size: 12px;
+      letter-spacing: 3px;
+      text-transform: uppercase;
+      color: #38bdf8;
+      font-weight: 700;
+      margin-bottom: 24px;
+    }
+    .progress-container {
+      width: 100%;
+      height: 10px;
+      background: rgba(255, 255, 255, 0.08);
+      border-radius: 999px;
+      overflow: hidden;
+      position: relative;
+      margin-bottom: 14px;
+      border: 1px solid rgba(255, 255, 255, 0.05);
+    }
+    .progress-bar {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, #0284c7, #38bdf8, #818cf8);
+      border-radius: 999px;
+      transition: width 0.15s ease-out;
+      box-shadow: 0 0 16px rgba(56, 189, 248, 0.6);
+      position: relative;
+    }
+    .progress-bar::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.4), transparent);
+      animation: shimmer 1.6s infinite;
+    }
+    @keyframes shimmer {
+      0% { transform: translateX(-100%); }
+      100% { transform: translateX(100%); }
+    }
+    .status-row {
+      width: 100%;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 13px;
+      color: #94a3b8;
+      margin-bottom: 12px;
+      font-weight: 500;
+    }
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: #f1f5f9;
+      font-weight: 600;
+    }
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #10b981;
+      box-shadow: 0 0 10px #10b981;
+      animation: pulse-dot 1.8s infinite;
+    }
+    @keyframes pulse-dot {
+      0%, 100% { transform: scale(1); opacity: 1; }
+      50% { transform: scale(1.3); opacity: 0.6; }
+    }
+    .file-detail {
+      font-size: 12px;
+      color: #64748b;
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      margin-bottom: 18px;
+    }
+    .tips-box {
+      font-size: 12px;
+      color: #94a3b8;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      border-radius: 8px;
+      padding: 8px 14px;
+      width: 100%;
+      box-sizing: border-box;
+    }
+    body.game-started #loader-overlay {
+      display: none !important;
+    }
+  </style>
+</head>
+<body
+  data-is-touch="0"
+  data-state-menu="1"
+  data-state-cutscene="0"
+  data-state-car="0"
+  data-state-gun="0"
+  data-state-car-gun="0"
+  data-state-job="0"
+  data-state-veh-gun="0"
+  data-state-download="0">
+
+  <!-- Interactive Loading Screen -->
+  <div id="loader-overlay">
+    <div class="loader-card">
+      <div class="gta-title">Grand Theft Auto III</div>
+      <div class="gta-subtitle">WebAssembly Edition</div>
+      
+      <div class="status-row">
+        <span class="status-badge">
+          <span class="status-dot"></span>
+          <span id="loader-status-text">Initializing Game Engine...</span>
+        </span>
+        <span id="loader-percent" style="font-family: ui-monospace, monospace; color: #38bdf8; font-weight: 700;">0%</span>
+      </div>
+
+      <div class="progress-container">
+        <div class="progress-bar" id="loader-progress-bar"></div>
+      </div>
+
+      <div class="file-detail" id="loader-file-detail">Preparing local virtual filesystem...</div>
+
+      <div class="tips-box">
+        💡 <strong>Tip:</strong> Once loaded, click anywhere on screen to lock audio and start playing.
+      </div>
+    </div>
+  </div>
+
+  <div id="wrap">
+    <canvas id="canvas" width="1280" height="720" tabindex="0"></canvas>
+  </div>
+  <progress id="progress" hidden value="0" max="1"></progress>
+  <div id="status" hidden aria-hidden="true"></div>
+  <div id="tap-hint" hidden aria-hidden="true"></div>
+  <!-- Каждая кнопка — пустой div: иконка это background-image, иначе её
+       нельзя было бы переключать из CSS по data-state-*. Скрыт, пока
+       game.js не выставит data-is-touch="1". -->
+  <div class="touch-controls-wrapper">
+    <div id="touch-move"></div>
+    <div id="touch-look"></div>
+
+    <div class="touch-control run"></div>
+    <div class="touch-control jump"></div>
+    <div class="touch-control fist"></div>
+    <div class="touch-control getIn"></div>
+    <div class="touch-control drift"></div>
+    <div class="touch-control menu"></div>
+    <div class="touch-control camera"></div>
+    <div class="touch-control horn"></div>
+    <div class="touch-control job"></div>
+    <div class="touch-control radio"></div>
+    <div class="touch-control weapon"></div>
+    <div class="touch-control fireLeft"></div>
+    <div class="touch-control fireRight"></div>
+  </div>
+  <script>
+    /* Ключ облачных сейвов из ?token=XXXXX: должен попасть в localStorage
+     * ДО загрузки jsdos-cloud-sdk.js — SDK читает js.cloud.sdk.v8.key
+     * в момент исполнения скрипта. */
+    (function () {
+      try {
+        var token = new URLSearchParams(location.search).get('token');
+        if (token) localStorage.setItem('js.cloud.sdk.v8.key', token.trim());
+      } catch (e) {}
+    })();
+  </script>
+  <script>
+    (function () {
+      try {
+        if (window.top && window.top !== window) {
+          window.top.postMessage("swg-ready", "*");
+        }
+      } catch (e) {}
+    })();
+  </script>
+  <script type="module">
+    import { agti } from "./gc.js";
+    window.agti = (instance, callback) => agti(instance, "https://hector.dos.zone/ws", callback);
+  </script>
+  <!-- Виртуальный геймпад: патчит navigator.getGamepads, отдавая
+       mapping:"standard". Должен быть до game.js. -->
+  <script src="gamepad-emulator.js?v=139"></script>
+  <script src="jsdos-cloud-sdk.js?v=139"></script>
+  <script src="index.js?v=139"></script>
+  <script src="game.js?v=150"></script>
+</body>
+</html>
