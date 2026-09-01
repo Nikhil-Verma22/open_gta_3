@@ -1,0 +1,7 @@
+MP3 Report File
+
+"." - not an MP3 or supported MP3 type
+".." - not an MP3 or supported MP3 type
+"MP3Report.txt" - not an MP3 or supported MP3 type
+
+TOTAL SUPPORTED MP3s: 0
