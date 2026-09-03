@@ -40,10 +40,17 @@ def get_mime(path):
 FILE_CACHE = {}
 
 def get_file_bytes(filepath):
+    # Do not cache code files so changes are immediately served
+    ext = os.path.splitext(filepath)[1].lower()
+    if ext in ['.html', '.js', '.css']:
+        if os.path.isfile(filepath):
+            with open(filepath, 'rb') as f:
+                return f.read()
+        return None
+
     if filepath in FILE_CACHE:
         return FILE_CACHE[filepath]
     if os.path.isfile(filepath):
-        # Cache files under 10MB
         size = os.path.getsize(filepath)
         with open(filepath, 'rb') as f:
             data = f.read()
@@ -146,7 +153,9 @@ async def handle_client(reader, writer):
                 await writer.drain()
                 continue
 
+            ext = os.path.splitext(filepath)[1].lower()
             mime = get_mime(filepath)
+            cache_ctrl = "no-cache, no-store, must-revalidate" if ext in ['.html', '.css', '.js'] else "public, max-age=86400"
             header = (
                 f"HTTP/1.1 200 OK\r\n"
                 f"Content-Type: {mime}\r\n"
@@ -154,7 +163,7 @@ async def handle_client(reader, writer):
                 f"Access-Control-Allow-Origin: *\r\n"
                 f"Cross-Origin-Opener-Policy: same-origin\r\n"
                 f"Cross-Origin-Embedder-Policy: require-corp\r\n"
-                f"Cache-Control: public, max-age=3600\r\n"
+                f"Cache-Control: {cache_ctrl}\r\n"
                 f"Connection: keep-alive\r\n\r\n"
             ).encode('latin1')
 

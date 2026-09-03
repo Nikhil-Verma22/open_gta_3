@@ -312,6 +312,11 @@ function markGameStarted() {
   hideTapHint();
   hideLoaderUI();
   document.body.classList.add('game-started');
+  document.body.dataset.stateMenu = '0';
+  document.body.dataset.stateCutscene = '0';
+  if (!document.body.dataset.stateCar) {
+    document.body.dataset.stateCar = '0';
+  }
 }
 
 function simulateEnter(target) {
@@ -1245,136 +1250,342 @@ function prefetchFirstMissionAudio() {
  * Подробности — touch-controls/TOUCH_CONTROLS.md. */
 
 function wantsTouchControls() {
+  if (location.search.includes('touch=1') || window.__wantsTouch) return true;
   try {
     if (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) return true;
   } catch (_) {}
-  return ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+  return ('ontouchstart' in window) || (navigator.maxTouchPoints > 0) || /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
 }
 
 const isTouchDevice = wantsTouchControls();
 
-/* Индексы кнопок — W3C Standard Gamepad, не GLFW: 6/7 это триггеры, а
- * Back/Start — 8/9. Перевод в порядок GLFW делает Regta3JoyRefresh
- * (src/skel/glfw/glfw.cpp), там же аналоговые триггеры становятся осями. */
 const TOUCH_BTN = {
   A: 0, B: 1, X: 2, Y: 3,
   LB: 4, RB: 5, LT: 6, RT: 7,
   BACK: 8, START: 9, L3: 10, R3: 11,
+  DPAD_UP: 12, DPAD_DOWN: 13, DPAD_LEFT: 14, DPAD_RIGHT: 15,
 };
 
-/* selector → индекс(ы) кнопки пада. Массив = один тап жмёт несколько
- * кнопок: drive-by в III это «огонь» + «смотреть вбок», отдельного
- * действия у игры нет и заводить его не нужно. */
-const TOUCH_BUTTONS = [
-  ['.touch-control.run', TOUCH_BTN.A],          // спринт / газ / выбор в меню
-  ['.touch-control.fist', TOUCH_BTN.B],         // огонь
-  ['.touch-control.jump', TOUCH_BTN.X],         // прыжок / тормоз
-  ['.touch-control.getIn', TOUCH_BTN.Y],        // сесть-выйти / назад в меню
-  ['.touch-control.radio', TOUCH_BTN.LB],       // радиостанция
-  ['.touch-control.drift', TOUCH_BTN.RB],       // ручник / захват цели
-  ['.touch-control.weapon', TOUCH_BTN.RT],      // следующее оружие
-  ['.touch-control.camera', TOUCH_BTN.BACK],    // вид камеры
-  ['.touch-control.menu', TOUCH_BTN.START],     // пауза
-  ['.touch-control.horn', TOUCH_BTN.L3],        // клаксон
-  ['.touch-control.job', TOUCH_BTN.R3],         // субмиссия
-  ['.touch-control.fireLeft', [TOUCH_BTN.B, TOUCH_BTN.LT]],
-  ['.touch-control.fireRight', [TOUCH_BTN.B, TOUCH_BTN.RT]],
-];
+/* Dual-dispatch mappings: dispatches both KeyboardEvent (GLFW) and GamepadEmulator */
+const TOUCH_KEY_MAPPINGS = {
+  // Movement / DPad
+  'dpad-up':    { key: 'w', code: 'KeyW', keyCode: 87, gpBtn: TOUCH_BTN.DPAD_UP, axisY: -1 },
+  'dpad-down':  { key: 's', code: 'KeyS', keyCode: 83, gpBtn: TOUCH_BTN.DPAD_DOWN, axisY: 1 },
+  'dpad-left':  { key: 'a', code: 'KeyA', keyCode: 65, gpBtn: TOUCH_BTN.DPAD_LEFT, axisX: -1 },
+  'dpad-right': { key: 'd', code: 'KeyD', keyCode: 68, gpBtn: TOUCH_BTN.DPAD_RIGHT, axisX: 1 },
+
+  // On-Foot Actions
+  'run':        { key: 'Shift', code: 'ShiftLeft', keyCode: 16, gpBtn: TOUCH_BTN.A },
+  'jump':       { key: ' ', code: 'Space', keyCode: 32, gpBtn: TOUCH_BTN.X },
+  'fist':       { key: 'Control', code: 'ControlLeft', keyCode: 17, gpBtn: TOUCH_BTN.B },
+  'target':     { key: 'Delete', code: 'Delete', keyCode: 46, gpBtn: TOUCH_BTN.RB },
+  'weapon':     { key: 'Enter', code: 'Enter', keyCode: 13, gpBtn: TOUCH_BTN.RT },
+  'lookBehind': { key: 'CapsLock', code: 'CapsLock', keyCode: 20 },
+
+  // In-Car Actions
+  'gas':        { key: 'w', code: 'KeyW', keyCode: 87, gpBtn: TOUCH_BTN.A, axisY: -1 },
+  'brake':      { key: 's', code: 'KeyS', keyCode: 83, gpBtn: TOUCH_BTN.X, axisY: 1 },
+  'drift':      { key: ' ', code: 'Space', keyCode: 32, gpBtn: TOUCH_BTN.RB },
+  'horn':       { key: 'Shift', code: 'ShiftLeft', keyCode: 16, gpBtn: TOUCH_BTN.L3 },
+  'radio':      { key: 'r', code: 'KeyR', keyCode: 82, gpBtn: TOUCH_BTN.LB },
+  'job':        { key: 'CapsLock', code: 'CapsLock', keyCode: 20, gpBtn: TOUCH_BTN.R3 },
+  'fireLeft':   { key: 'q', code: 'KeyQ', keyCode: 81, extraKey: { key: 'Control', code: 'ControlLeft', keyCode: 17 }, gpBtn: [TOUCH_BTN.B, TOUCH_BTN.LT] },
+  'fireRight':  { key: 'e', code: 'KeyE', keyCode: 69, extraKey: { key: 'Control', code: 'ControlLeft', keyCode: 17 }, gpBtn: [TOUCH_BTN.B, TOUCH_BTN.RT] },
+
+  // Universal
+  'getIn':      { key: 'f', code: 'KeyF', keyCode: 70, gpBtn: TOUCH_BTN.Y },
+  'camera':     { key: 'c', code: 'KeyC', keyCode: 67, gpBtn: TOUCH_BTN.BACK },
+  'menu':       { key: 'Escape', code: 'Escape', keyCode: 27, gpBtn: TOUCH_BTN.START },
+};
 
 let touchEmulator = null;
 let touchPadIndex = -1;
-/* [{ el, buttonIndexes }] — для releaseHiddenTouchButtons. */
 let touchBindings = [];
 
-/* Кнопка, которую спрятали прямо во время удержания (сел в машину с
- * зажатым «огонь», открыл меню с зажатым газом), может не получить
- * pointerup: гарантий, что браузер пришлёт boundary-событие на
- * display:none, нет. Тогда пад так и останется с нажатой кнопкой.
- * Поэтому на каждой смене состояния отпускаем всё, что стало невидимым. */
-function releaseHiddenTouchButtons() {
-  if (!touchEmulator || touchPadIndex < 0) return;
-  for (const { el, buttonIndexes } of touchBindings) {
-    if (getComputedStyle(el).display !== 'none') continue;
-    try {
-      touchEmulator.PressButton(touchPadIndex, buttonIndexes, 0, false);
-    } catch (_) {}
+function dispatchGameKey(mapping, isDown) {
+  if (!mapping) return;
+
+  // 1. Dispatch DOM KeyboardEvent for GLFW / JSEvents
+  const eventType = isDown ? 'keydown' : 'keyup';
+  const ev = new KeyboardEvent(eventType, {
+    key: mapping.key,
+    code: mapping.code,
+    keyCode: mapping.keyCode,
+    which: mapping.keyCode,
+    bubbles: true,
+    cancelable: true
+  });
+  window.dispatchEvent(ev);
+  if (canvas) canvas.dispatchEvent(ev);
+
+  if (mapping.extraKey) {
+    const extraEv = new KeyboardEvent(eventType, {
+      key: mapping.extraKey.key,
+      code: mapping.extraKey.code,
+      keyCode: mapping.extraKey.keyCode,
+      which: mapping.extraKey.keyCode,
+      bubbles: true,
+      cancelable: true
+    });
+    window.dispatchEvent(extraEv);
+    if (canvas) canvas.dispatchEvent(extraEv);
   }
+
+  // 2. Dispatch Gamepad Emulator button & axis
+  if (touchEmulator && touchPadIndex >= 0) {
+    if (mapping.gpBtn !== undefined) {
+      const btns = Array.isArray(mapping.gpBtn) ? mapping.gpBtn : [mapping.gpBtn];
+      for (const b of btns) {
+        try {
+          touchEmulator.PressButton(touchPadIndex, b, isDown ? 1 : 0, isDown);
+        } catch (_) {}
+      }
+    }
+    if (mapping.axisX !== undefined) {
+      try {
+        touchEmulator.MoveAxis(touchPadIndex, 0, isDown ? mapping.axisX : 0);
+      } catch (_) {}
+    }
+    if (mapping.axisY !== undefined) {
+      try {
+        touchEmulator.MoveAxis(touchPadIndex, 1, isDown ? mapping.axisY : 0);
+      } catch (_) {}
+    }
+  }
+}
+
+function releaseHiddenTouchButtons() {
+  for (const { el, releaseFunc } of touchBindings) {
+    if (getComputedStyle(el).display === 'none') {
+      try { releaseFunc(); } catch (_) {}
+    }
+  }
+}
+
+function initDpad() {
+  const dpad = document.getElementById('touch-dpad');
+  const knob = document.getElementById('dpad-knob');
+  if (!dpad) return;
+
+  let activePointerId = null;
+  const activeDirs = { up: false, down: false, left: false, right: false };
+
+  function updateDpadFromCoords(clientX, clientY) {
+    const rect = dpad.getBoundingClientRect();
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+    const dx = clientX - centerX;
+    const dy = clientY - centerY;
+    const dist = Math.hypot(dx, dy);
+    const maxRadius = rect.width / 2;
+
+    const deadZone = maxRadius * 0.15;
+    const newDirs = { up: false, down: false, left: false, right: false };
+
+    if (dist > deadZone) {
+      const deg = Math.atan2(dy, dx) * (180 / Math.PI);
+
+      if (deg >= -157.5 && deg <= -22.5) newDirs.up = true;
+      if (deg >= 22.5 && deg <= 157.5) newDirs.down = true;
+      if (deg >= 112.5 || deg <= -112.5) newDirs.left = true;
+      if (deg >= -67.5 && deg <= 67.5) newDirs.right = true;
+
+      const clampDist = Math.min(dist, maxRadius * 0.55);
+      const kx = (dx / dist) * clampDist;
+      const ky = (dy / dist) * clampDist;
+      if (knob) knob.style.transform = `translate(${kx.toFixed(1)}px, ${ky.toFixed(1)}px)`;
+    } else {
+      if (knob) knob.style.transform = 'translate(0px, 0px)';
+    }
+
+    for (const dir of ['up', 'down', 'left', 'right']) {
+      const btnEl = dpad.querySelector('.dpad-' + dir);
+      if (newDirs[dir] !== activeDirs[dir]) {
+        activeDirs[dir] = newDirs[dir];
+        btnEl?.classList.toggle('active', newDirs[dir]);
+        dispatchGameKey(TOUCH_KEY_MAPPINGS['dpad-' + dir], newDirs[dir]);
+      }
+    }
+  }
+
+  function releaseDpad() {
+    activePointerId = null;
+    if (knob) knob.style.transform = 'translate(0px, 0px)';
+    for (const dir of ['up', 'down', 'left', 'right']) {
+      if (activeDirs[dir]) {
+        activeDirs[dir] = false;
+        dpad.querySelector('.dpad-' + dir)?.classList.remove('active');
+        dispatchGameKey(TOUCH_KEY_MAPPINGS['dpad-' + dir], false);
+      }
+    }
+  }
+
+  dpad.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    activePointerId = e.pointerId;
+    try { dpad.setPointerCapture(e.pointerId); } catch (_) {}
+    updateDpadFromCoords(e.clientX, e.clientY);
+  });
+
+  dpad.addEventListener('pointermove', (e) => {
+    if (e.pointerId === activePointerId) {
+      e.preventDefault();
+      e.stopPropagation();
+      updateDpadFromCoords(e.clientX, e.clientY);
+    }
+  });
+
+  dpad.addEventListener('pointerup', (e) => {
+    if (e.pointerId === activePointerId) {
+      e.preventDefault();
+      e.stopPropagation();
+      try { dpad.releasePointerCapture(e.pointerId); } catch (_) {}
+      releaseDpad();
+    }
+  });
+
+  dpad.addEventListener('pointercancel', (e) => {
+    if (e.pointerId === activePointerId) {
+      releaseDpad();
+    }
+  });
+}
+
+function initTouchLook() {
+  const lookArea = document.getElementById('touch-look');
+  if (!lookArea) return;
+
+  let lastX = 0, lastY = 0;
+  let lookPointerId = null;
+
+  lookArea.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    lookPointerId = e.pointerId;
+    lastX = e.clientX;
+    lastY = e.clientY;
+    try { lookArea.setPointerCapture(e.pointerId); } catch (_) {}
+  });
+
+  lookArea.addEventListener('pointermove', (e) => {
+    if (e.pointerId === lookPointerId) {
+      e.preventDefault();
+      const dx = e.clientX - lastX;
+      const dy = e.clientY - lastY;
+      lastX = e.clientX;
+      lastY = e.clientY;
+
+      if (canvas && (dx !== 0 || dy !== 0)) {
+        const mouseEv = new MouseEvent('mousemove', {
+          bubbles: true,
+          cancelable: true,
+          clientX: e.clientX,
+          clientY: e.clientY,
+          movementX: dx * 1.5,
+          movementY: dy * 1.5
+        });
+        canvas.dispatchEvent(mouseEv);
+      }
+
+      if (touchEmulator && touchPadIndex >= 0) {
+        const rx = Math.max(-1, Math.min(1, dx / 20));
+        const ry = Math.max(-1, Math.min(1, dy / 20));
+        touchEmulator.MoveAxis(touchPadIndex, 2, rx);
+        touchEmulator.MoveAxis(touchPadIndex, 3, ry);
+      }
+    }
+  });
+
+  const stopLook = (e) => {
+    if (e.pointerId === lookPointerId) {
+      lookPointerId = null;
+      try { lookArea.releasePointerCapture(e.pointerId); } catch (_) {}
+      if (touchEmulator && touchPadIndex >= 0) {
+        touchEmulator.MoveAxis(touchPadIndex, 2, 0);
+        touchEmulator.MoveAxis(touchPadIndex, 3, 0);
+      }
+    }
+  };
+
+  lookArea.addEventListener('pointerup', stopLook);
+  lookArea.addEventListener('pointercancel', stopLook);
 }
 
 function installTouchControls() {
   document.body.dataset.isTouch = isTouchDevice ? '1' : '0';
-  if (!isTouchDevice) return;
-  if (typeof GamepadEmulator !== 'function') {
-    console.warn('[regta3] gamepad-emulator.js not loaded — touch unavailable');
-    return;
-  }
-  if (touchEmulator) return; // конструктор бросает на второй экземпляр
 
-  try {
-    touchEmulator = new GamepadEmulator();
-  } catch (err) {
-    console.warn('[regta3] GamepadEmulator:', err && err.message ? err.message : err);
-    return;
-  }
-
-  /* overlayMode=true: пад занимает индекс 0 и в patched getGamepads
-   * сливается с настоящим геймпадом на том же индексе (кнопка = OR,
-   * ось = большая по модулю). Поэтому реальный пад и тач работают
-   * одновременно и joy1id не переезжает. */
-  const pad = touchEmulator.AddEmulatedGamepad(null, true);
-  if (!pad) {
-    console.warn('[regta3] failed to create emulated gamepad');
-    return;
-  }
-
-  const index = pad.index;
-
-  /* Левая половина экрана — движение, правая — камера. Центр стика там,
-   * где палец коснулся, поэтому рисовать нечего: вся половина и есть
-   * стик. lockTargetWhilePressed → setPointerCapture, драг продолжает
-   * отслеживаться, даже если палец ушёл на чужую половину. */
-  const sticks = [
-    ['touch-move', 0, 1],
-    ['touch-look', 2, 3],
-  ];
-  for (const [id, xAxisIndex, yAxisIndex] of sticks) {
-    const tapTarget = document.getElementById(id);
-    if (!tapTarget) continue;
-    touchEmulator.AddDisplayJoystickEventListeners(index, [{
-      directions: { up: true, down: true, left: true, right: true },
-      dragDistance: 100,
-      tapTarget,
-      lockTargetWhilePressed: true,
-      xAxisIndex,
-      yAxisIndex,
-    }]);
-  }
-
-  /* type:'onOff' обязателен: без него AddButtonTouchEventListeners вешает
-   * только pointerenter/leave, а pointerdown/up — нет. lockTargetWhilePressed
-   * держим false, тогда enter/leave тоже живы и палец, съехавший на
-   * соседнюю кнопку, её нажимает. */
-  const configs = [];
-  for (const [selector, buttonIndexes] of TOUCH_BUTTONS) {
-    const tapTarget = document.querySelector(selector);
-    if (!tapTarget) {
-      console.warn('[regta3] нет элемента ' + selector);
-      continue;
+  if (typeof GamepadEmulator === 'function' && !touchEmulator) {
+    try {
+      touchEmulator = new GamepadEmulator();
+      const pad = touchEmulator.AddEmulatedGamepad(null, true);
+      if (pad) touchPadIndex = pad.index;
+    } catch (err) {
+      console.warn('[regta3] GamepadEmulator:', err && err.message ? err.message : err);
     }
-    const indexes = Array.isArray(buttonIndexes) ? buttonIndexes : [buttonIndexes];
-    configs.push({
-      buttonIndexes: indexes,
-      type: 'onOff',
-      lockTargetWhilePressed: false,
-      tapTarget,
-    });
-    touchBindings.push({ el: tapTarget, buttonIndexes: indexes });
   }
-  touchEmulator.AddDisplayButtonEventListeners(index, configs);
-  touchPadIndex = index;
 
-  console.log('[regta3] touch controls enabled (emulated pad #' + index + ')');
+  initDpad();
+  initTouchLook();
+
+  touchBindings = [];
+  for (const [actionName, mapping] of Object.entries(TOUCH_KEY_MAPPINGS)) {
+    if (actionName.startsWith('dpad-')) continue;
+    const btn = document.querySelector('.touch-control.' + actionName);
+    if (!btn) continue;
+
+    let active = false;
+
+    const press = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!active) {
+        active = true;
+        btn.classList.add('active');
+        dispatchGameKey(mapping, true);
+      }
+    };
+
+    const release = (e) => {
+      if (e) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+      if (active) {
+        active = false;
+        btn.classList.remove('active');
+        dispatchGameKey(mapping, false);
+      }
+    };
+
+    btn.addEventListener('pointerdown', press);
+    btn.addEventListener('pointerup', release);
+    btn.addEventListener('pointercancel', release);
+    btn.addEventListener('pointerleave', (e) => {
+      if (e.buttons === 0) release(e);
+    });
+
+    if (actionName === 'getIn') {
+      btn.addEventListener('click', () => {
+        const isCar = document.body.dataset.stateCar === '1';
+        setVehicleMode(!isCar);
+      });
+    }
+
+    touchBindings.push({ el: btn, releaseFunc: release });
+  }
+
+  console.log('[regta3] touch controls enabled with responsive D-Pad and contextual actions');
 }
+
+function setVehicleMode(isCar) {
+  document.body.dataset.stateCar = isCar ? '1' : '0';
+  const vehBtn = document.getElementById('veh-mode-toggle');
+  if (vehBtn) {
+    vehBtn.textContent = isCar ? '🚗 IN CAR' : '🚶 ON FOOT';
+  }
+  releaseHiddenTouchButtons();
+}
+window.setVehicleMode = setVehicleMode;
 
 /* Битовая маска из regta3_js_touch_state (REGTA3_TOUCH_* в crossplatform.h). */
 const TOUCH_STATE_BITS = [

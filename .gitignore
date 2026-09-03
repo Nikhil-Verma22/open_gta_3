@@ -8,3 +8,6 @@ extracted/
 extracted_2/
 .vscode/
 .idea/
+
+__pycache__/
+*.pyc

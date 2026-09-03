@@ -119,9 +119,19 @@
       window.addEventListener('pagehide', flushLogs);
       window.addEventListener('beforeunload', flushLogs);
     })();
+    window.addEventListener('touchstart', function () {
+      document.body.dataset.isTouch = '1';
+    }, { passive: true, once: true });
+    (function () {
+      const isTouch = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0) || (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) || /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) || location.search.includes('touch=1');
+      if (isTouch) {
+        document.documentElement.dataset.isTouch = '1';
+        window.__wantsTouch = true;
+      }
+    })();
   </script>
-  <!-- Оверлей тач-управления: генерируется tools/build_touch_css.py. -->
-  <link rel="stylesheet" href="touch.css?v=139">
+  <!-- Touch Controls Overlay -->
+  <link rel="stylesheet" href="touch.css?v=151">
   <style>
     html, body {
       margin: 0;
@@ -286,8 +296,8 @@
   </style>
 </head>
 <body
-  data-is-touch="0"
-  data-state-menu="1"
+  data-is-touch="1"
+  data-state-menu="0"
   data-state-cutscene="0"
   data-state-car="0"
   data-state-gun="0"
@@ -328,26 +338,59 @@
   <progress id="progress" hidden value="0" max="1"></progress>
   <div id="status" hidden aria-hidden="true"></div>
   <div id="tap-hint" hidden aria-hidden="true"></div>
-  <!-- Каждая кнопка — пустой div: иконка это background-image, иначе её
-       нельзя было бы переключать из CSS по data-state-*. Скрыт, пока
-       game.js не выставит data-is-touch="1". -->
-  <div class="touch-controls-wrapper">
-    <div id="touch-move"></div>
+  <!-- Top bar status & mode toggles -->
+  <div class="touch-top-bar">
+    <button id="touch-toggle-btn" class="touch-bar-btn" title="Toggle On-Screen Touch Controls">📱 Touch</button>
+    <button id="veh-mode-toggle" class="touch-bar-btn veh-mode-btn" title="Toggle On-Foot / In-Car Controls">🚶 ON FOOT</button>
+  </div>
+
+  <div class="touch-controls-wrapper" id="touch-controls">
+    <!-- Left Zone: Directional Movement Controls (D-Pad & Joystick) -->
+    <div id="touch-move">
+      <div class="touch-dpad" id="touch-dpad">
+        <div class="dpad-button dpad-up" data-dir="up" title="Forward (W)">
+          <svg viewBox="0 0 24 24"><path d="M12 4l-7 7h4v8h6v-8h4z"/></svg>
+        </div>
+        <div class="dpad-button dpad-left" data-dir="left" title="Left / Steer Left (A)">
+          <svg viewBox="0 0 24 24"><path d="M4 12l7-7v4h8v6h-8v4z"/></svg>
+        </div>
+        <div class="dpad-center" id="dpad-center">
+          <div class="dpad-knob" id="dpad-knob"></div>
+        </div>
+        <div class="dpad-button dpad-right" data-dir="right" title="Right / Steer Right (D)">
+          <svg viewBox="0 0 24 24"><path d="M20 12l-7-7v4H5v6h8v4z"/></svg>
+        </div>
+        <div class="dpad-button dpad-down" data-dir="down" title="Backward / Reverse (S)">
+          <svg viewBox="0 0 24 24"><path d="M12 20l7-7h-4V5H9v8H5z"/></svg>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right Zone: Camera look / swipe area -->
     <div id="touch-look"></div>
 
-    <div class="touch-control run"></div>
-    <div class="touch-control jump"></div>
-    <div class="touch-control fist"></div>
-    <div class="touch-control getIn"></div>
-    <div class="touch-control drift"></div>
-    <div class="touch-control menu"></div>
-    <div class="touch-control camera"></div>
-    <div class="touch-control horn"></div>
-    <div class="touch-control job"></div>
-    <div class="touch-control radio"></div>
-    <div class="touch-control weapon"></div>
-    <div class="touch-control fireLeft"></div>
-    <div class="touch-control fireRight"></div>
+    <!-- ON-FOOT ONLY ACTION BUTTONS -->
+    <div class="touch-control run on-foot-only" title="Sprint (Shift)"></div>
+    <div class="touch-control jump on-foot-only" title="Jump (Space)"></div>
+    <div class="touch-control fist on-foot-only" title="Attack / Fire (Ctrl)"></div>
+    <div class="touch-control target on-foot-only" title="Target Lock (Del)"></div>
+
+    <!-- IN-CAR ONLY ACTION BUTTONS -->
+    <div class="touch-control gas in-car-only" title="Accelerate (W)"></div>
+    <div class="touch-control brake in-car-only" title="Brake / Reverse (S)"></div>
+    <div class="touch-control drift in-car-only" title="Handbrake (Space)"></div>
+    <div class="touch-control horn in-car-only" title="Horn / Siren (Shift)"></div>
+    <div class="touch-control radio in-car-only" title="Radio (R)"></div>
+    <div class="touch-control job in-car-only" title="Sub-Mission (Caps)"></div>
+    <div class="touch-control fireLeft in-car-only" title="Drive-By Left"></div>
+    <div class="touch-control fireRight in-car-only" title="Drive-By Right"></div>
+
+    <!-- UNIVERSAL BUTTONS -->
+    <div class="touch-control getIn" title="Enter / Exit Vehicle (F)"></div>
+    <div class="touch-control lookBehind" title="Look Behind"></div>
+    <div class="touch-control weapon" title="Next Weapon (Enter)"></div>
+    <div class="touch-control camera" title="Change Camera (C)"></div>
+    <div class="touch-control menu" title="Pause / Menu (Esc)"></div>
   </div>
   <script>
     /* Ключ облачных сейвов из ?token=XXXXX: должен попасть в localStorage
@@ -373,11 +416,32 @@
     import { agti } from "./gc.js";
     window.agti = (instance, callback) => agti(instance, "https://hector.dos.zone/ws", callback);
   </script>
+  <script>
+    document.getElementById('touch-toggle-btn')?.addEventListener('click', function (e) {
+      e.stopPropagation();
+      const cur = document.body.dataset.isTouch === '1';
+      document.body.dataset.isTouch = cur ? '0' : '1';
+      this.style.borderColor = cur ? 'rgba(255,255,255,0.2)' : '#38bdf8';
+      this.style.color = cur ? '#94a3b8' : '#38bdf8';
+    });
+
+    document.getElementById('veh-mode-toggle')?.addEventListener('click', function (e) {
+      e.stopPropagation();
+      const isCar = document.body.dataset.stateCar === '1';
+      const nextCar = !isCar;
+      document.body.dataset.stateMenu = '0';
+      document.body.dataset.stateCar = nextCar ? '1' : '0';
+      this.textContent = nextCar ? '🚗 IN CAR' : '🚶 ON FOOT';
+      if (typeof window.setVehicleMode === 'function') {
+        window.setVehicleMode(nextCar);
+      }
+    });
+  </script>
   <!-- Виртуальный геймпад: патчит navigator.getGamepads, отдавая
        mapping:"standard". Должен быть до game.js. -->
   <script src="gamepad-emulator.js?v=139"></script>
   <script src="jsdos-cloud-sdk.js?v=139"></script>
   <script src="index.js?v=139"></script>
-  <script src="game.js?v=150"></script>
+  <script src="game.js?v=151"></script>
 </body>
 </html>
