@@ -39,14 +39,66 @@
       }
       window.remoteLog = queueLog;
 
+      // System Error Notification helper
+      function showSystemError(err) {
+        try {
+          const toast = document.getElementById('system-error-toast');
+          const content = document.getElementById('system-error-content');
+          if (!toast || !content) return;
+
+          let msg = '';
+          if (typeof err === 'string') {
+            msg = err;
+          } else if (err && err.message) {
+            msg = err.message;
+            if (err.stack && !err.stack.includes(err.message)) {
+              msg += '\n' + err.stack;
+            }
+          } else {
+            try {
+              msg = JSON.stringify(err);
+            } catch (_) {
+              msg = String(err);
+            }
+          }
+          if (msg.includes('ResizeObserver loop completed') || msg.includes('ResizeObserver loop limit')) {
+            return;
+          }
+
+          content.textContent = msg;
+          toast.hidden = false;
+          toast.classList.remove('hidden');
+
+          if (typeof window.hideEngineStartingSpinner === 'function') {
+            window.hideEngineStartingSpinner();
+          }
+        } catch (_) {}
+      }
+      window.showSystemError = showSystemError;
+
       // Intercept window errors & unhandled promise rejections
       window.addEventListener('error', function (e) {
         const msg = (e.error && e.error.stack) ? e.error.stack : (e.message || String(e));
         queueLog('ERROR', 'WINDOW', msg);
+        showSystemError(msg);
       });
       window.addEventListener('unhandledrejection', function (e) {
         const reason = (e.reason && e.reason.stack) ? e.reason.stack : String(e.reason);
         queueLog('ERROR', 'PROMISE', reason);
+        showSystemError(reason);
+      });
+
+      document.addEventListener('DOMContentLoaded', function () {
+        const closeBtn = document.getElementById('system-error-close');
+        if (closeBtn) {
+          closeBtn.addEventListener('click', function () {
+            const toast = document.getElementById('system-error-toast');
+            if (toast) {
+              toast.classList.add('hidden');
+              setTimeout(function () { toast.hidden = true; }, 300);
+            }
+          });
+        }
       });
 
       // Intercept console functions
@@ -156,7 +208,7 @@
     })();
   </script>
   <!-- Touch Controls Overlay -->
-  <link rel="stylesheet" href="touch.css?v=154">
+  <link rel="stylesheet" href="touch.css?v=155">
   <style>
     html, body {
       margin: 0;
@@ -318,6 +370,153 @@
     body.game-started #loader-overlay {
       display: none !important;
     }
+
+    /* Bottom-Right Engine Starting Spinner */
+    .engine-spinner-toast {
+      position: fixed;
+      bottom: calc(env(safe-area-inset-bottom, 0px) + 20px);
+      right: calc(env(safe-area-inset-right, 0px) + 20px);
+      z-index: 500;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 16px 8px 12px;
+      background: rgba(15, 23, 42, 0.85);
+      border: 1px solid rgba(56, 189, 248, 0.35);
+      border-radius: 999px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6), 0 0 16px rgba(56, 189, 248, 0.2);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      pointer-events: none;
+      transition: opacity 0.4s cubic-bezier(0.4, 0, 0.2, 1), transform 0.4s cubic-bezier(0.4, 0, 0.2, 1), visibility 0.4s ease;
+      animation: spinner-toast-in 0.35s ease-out;
+    }
+    .engine-spinner-toast.hidden {
+      opacity: 0;
+      transform: translateY(12px);
+      pointer-events: none;
+      visibility: hidden;
+    }
+    @keyframes spinner-toast-in {
+      from {
+        opacity: 0;
+        transform: translateY(14px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+    .engine-spinner-circle {
+      width: 18px;
+      height: 18px;
+      border: 2.5px solid rgba(56, 189, 248, 0.2);
+      border-top-color: #38bdf8;
+      border-right-color: #818cf8;
+      border-radius: 50%;
+      animation: engine-spin 0.75s linear infinite;
+      flex-shrink: 0;
+    }
+    @keyframes engine-spin {
+      to { transform: rotate(360deg); }
+    }
+    .engine-spinner-text {
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+      color: #f1f5f9;
+      white-space: nowrap;
+      text-shadow: 0 1px 4px rgba(0, 0, 0, 0.8);
+    }
+
+    /* Bottom-Left System Error Notification */
+    .system-error-toast {
+      position: fixed;
+      bottom: calc(env(safe-area-inset-bottom, 0px) + 20px);
+      left: calc(env(safe-area-inset-left, 0px) + 20px);
+      z-index: 600;
+      max-width: min(420px, calc(100vw - 40px));
+      padding: 12px 14px;
+      background: rgba(24, 10, 14, 0.94);
+      border: 1px solid rgba(239, 68, 68, 0.45);
+      border-left: 4px solid #ef4444;
+      border-radius: 10px;
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.75), 0 0 20px rgba(239, 68, 68, 0.25);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      animation: error-toast-in 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+      transition: opacity 0.3s ease, transform 0.3s ease, visibility 0.3s ease;
+      box-sizing: border-box;
+      pointer-events: auto;
+    }
+    .system-error-toast.hidden {
+      opacity: 0;
+      transform: translateY(14px);
+      pointer-events: none;
+      visibility: hidden;
+    }
+    @keyframes error-toast-in {
+      from {
+        opacity: 0;
+        transform: translateY(16px) scale(0.97);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+      }
+    }
+    .system-error-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 6px;
+      gap: 8px;
+    }
+    .system-error-title-group {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .system-error-badge {
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: 0.8px;
+      background: #ef4444;
+      color: #ffffff;
+      padding: 2px 6px;
+      border-radius: 4px;
+      text-transform: uppercase;
+    }
+    .system-error-title {
+      font-size: 12px;
+      font-weight: 700;
+      color: #fca5a5;
+      letter-spacing: 0.5px;
+    }
+    .system-error-close-btn {
+      background: none;
+      border: none;
+      color: #94a3b8;
+      font-size: 18px;
+      line-height: 1;
+      cursor: pointer;
+      padding: 0 4px;
+      transition: color 0.15s ease;
+    }
+    .system-error-close-btn:hover {
+      color: #f1f5f9;
+    }
+    .system-error-content {
+      font-size: 12px;
+      line-height: 1.45;
+      color: #fecaca;
+      word-break: break-word;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      max-height: 180px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+    }
   </style>
 </head>
 <body
@@ -363,6 +562,25 @@
   <progress id="progress" hidden value="0" max="1"></progress>
   <div id="status" hidden aria-hidden="true"></div>
   <div id="tap-hint" hidden aria-hidden="true"></div>
+
+  <!-- Engine Starting Spinner (Bottom-Right: Shown when file download completes until main menu is ready) -->
+  <div id="engine-spinner" class="engine-spinner-toast hidden" hidden aria-live="polite">
+    <div class="engine-spinner-circle"></div>
+    <span class="engine-spinner-text">Starting game...</span>
+  </div>
+
+  <!-- System Error Notification (Bottom-Left: Displays any system/runtime errors) -->
+  <div id="system-error-toast" class="system-error-toast hidden" hidden role="alert" aria-live="assertive">
+    <div class="system-error-header">
+      <div class="system-error-title-group">
+        <span class="system-error-badge">ERROR</span>
+        <span class="system-error-title">System Notice</span>
+      </div>
+      <button id="system-error-close" class="system-error-close-btn" aria-label="Dismiss">&times;</button>
+    </div>
+    <div id="system-error-content" class="system-error-content"></div>
+  </div>
+
   <!-- Mobile Touch Controls Wrapper (Active strictly on mobile devices or ?touch=1) -->
   <div class="touch-controls-wrapper" id="touch-controls" aria-hidden="true">
     <!-- Persistent Secondary Controls Toggle Button (Slot U: Safe Top-Right) -->
@@ -528,6 +746,6 @@
   <script src="gamepad-emulator.js?v=139"></script>
   <script src="jsdos-cloud-sdk.js?v=139"></script>
   <script src="index.js?v=139"></script>
-  <script src="game.js?v=154"></script>
+  <script src="game.js?v=155"></script>
 </body>
 </html>

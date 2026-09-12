@@ -1,4 +1,4 @@
-const BUILD_VERSION = 150;
+const BUILD_VERSION = 155;
 const DEFAULTS_RESET_VERSION = 140;
 const ASSET_CACHE_NAME = 'gta3-assets-v2';
 const PRELOAD_CONCURRENCY = 32;
@@ -238,24 +238,64 @@ const ENSURE_BUDGET_PER_FRAME_MS = 12;
  * free roam after ~30s when ped/SFX storms ignored the soft budget. */
 const ENSURE_HARD_CAP_PER_FRAME_MS = 28;
 
+let engineSpinnerActive = false;
+let mainMenuLoaded = false;
+
+function showEngineStartingSpinner() {
+  if (mainMenuLoaded) return;
+  const el = document.getElementById('engine-spinner');
+  if (el) {
+    el.hidden = false;
+    el.classList.remove('hidden');
+    engineSpinnerActive = true;
+    if (typeof window.remoteLog === 'function') {
+      window.remoteLog('INFO', 'SPINNER', 'Engine starting spinner shown (bottom-right)');
+    }
+  }
+}
+
+function hideEngineStartingSpinner() {
+  const el = document.getElementById('engine-spinner');
+  if (el && engineSpinnerActive) {
+    el.classList.add('hidden');
+    setTimeout(() => {
+      el.hidden = true;
+    }, 400);
+    engineSpinnerActive = false;
+    if (typeof window.remoteLog === 'function') {
+      window.remoteLog('INFO', 'SPINNER', 'Engine starting spinner hidden');
+    }
+  }
+}
+
+window.showEngineStartingSpinner = showEngineStartingSpinner;
+window.hideEngineStartingSpinner = hideEngineStartingSpinner;
+
 function showDiagError(msg) {
   console.warn('[regta3] DIAGNOSTIC:', msg);
   setStatus('ERROR: ' + msg);
+  if (typeof window.showSystemError === 'function') {
+    window.showSystemError(msg);
+  }
+  hideEngineStartingSpinner();
 }
 
 // Catch WASM traps / JS errors from the rAF callback
 window.addEventListener('error', (ev) => {
   const err = ev.error || ev;
-  const msg = (err && err.message) ? err.message : String(err);
-  if (msg && (msg.includes('RuntimeError') || msg.includes('unreachable') || msg.includes('memory access') ||
-      msg.includes('abort') || msg.includes('Aborted') || msg.includes('wasm'))) {
-    showDiagError('WASM crash: ' + msg + '\n[sync calls in last frame: ' + syncCallCount + ']\n' + syncCallLog.slice(-10).join('\n'));
+  let msg = (err && err.message) ? err.message : String(err || ev.message || 'Unknown error');
+  if (msg.includes('ResizeObserver loop completed') || msg.includes('ResizeObserver loop limit')) return;
+  if (msg.includes('RuntimeError') || msg.includes('unreachable') || msg.includes('memory access') ||
+      msg.includes('abort') || msg.includes('Aborted') || msg.includes('wasm')) {
+    msg = 'WASM crash: ' + msg + '\n[sync calls in last frame: ' + syncCallCount + ']\n' + syncCallLog.slice(-10).join('\n');
   }
+  showDiagError(msg);
 });
 
 window.addEventListener('unhandledrejection', (ev) => {
   const msg = ev.reason ? String(ev.reason.message || ev.reason) : 'unknown';
   console.error('[regta3] Unhandled rejection:', msg);
+  showDiagError('Unhandled rejection: ' + msg);
 });
 
 function updateLoaderUI(done, total, statusText, fileDetail) {
@@ -287,6 +327,8 @@ function hideLoaderUI() {
       loaderOverlay.style.display = 'none';
     }, 600);
   }
+  // File downloading finished; show bottom-right loading circle until main menu is ready
+  showEngineStartingSpinner();
 }
 
 function setStatus(text) {
@@ -307,6 +349,8 @@ function hideTapHint() {
 }
 
 function markGameStarted() {
+  mainMenuLoaded = true;
+  hideEngineStartingSpinner();
   worldLoadComplete = true;
   setProgress(0, 0);
   hideTapHint();
@@ -396,6 +440,8 @@ function updateStatusFromRegta3(line) {
   maybeAutoEnter(line);
   // Start world model background stream when menu is ready
   if (line.includes('gGameState = GS_FRONTEND')) {
+    mainMenuLoaded = true;
+    hideEngineStartingSpinner();
     if (typeof window.remoteLog === 'function') window.remoteLog('INFO', 'STATE', 'Game state: GS_FRONTEND (Main menu ready)');
     prefetchWorldModels();
     // Warm cutscene audio and first mission early
@@ -410,6 +456,8 @@ function updateStatusFromRegta3(line) {
     prefetchAssetAsync(txdMatch[1].toLowerCase());
   }
   if (line.includes('gGameState = GS_PLAYING_GAME') || line.includes('[regta3] gGameState = GS_PLAYING_GAME')) {
+    mainMenuLoaded = true;
+    hideEngineStartingSpinner();
     if (typeof window.remoteLog === 'function') window.remoteLog('INFO', 'STATE', 'Game state: GS_PLAYING_GAME');
     unlockWebAudio();
     prefetchAssetAsync('anim/cuts.img');
@@ -2367,6 +2415,10 @@ const TOUCH_STATE_BITS = [
 ];
 
 function setTouchState(flags) {
+  if (flags & (1 << 0)) {
+    mainMenuLoaded = true;
+    hideEngineStartingSpinner();
+  }
   const ds = document.body.dataset;
   let changed = false;
   for (const [bit, name] of TOUCH_STATE_BITS) {
@@ -2754,7 +2806,9 @@ async function bootGame() {
     await Module.mainCalled();
   } catch (err) {
     console.error(err);
-    setStatus('Error: ' + err.message);
+    const msg = err && err.message ? err.message : String(err);
+    setStatus('Error: ' + msg);
+    showDiagError('Game boot failed: ' + msg);
     bootStarted = false;
   }
 }
