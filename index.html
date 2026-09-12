@@ -123,15 +123,40 @@
       document.body.dataset.isTouch = '1';
     }, { passive: true, once: true });
     (function () {
-      const isTouch = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0) || (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) || /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) || location.search.includes('touch=1');
-      if (isTouch) {
-        document.documentElement.dataset.isTouch = '1';
-        window.__wantsTouch = true;
+      try {
+        const params = new URLSearchParams(location.search);
+        if (params.get('touch') === '0') {
+          document.documentElement.dataset.isTouch = '0';
+          window.__wantsTouch = false;
+          return;
+        }
+        if (params.get('touch') === '1') {
+          document.documentElement.dataset.isTouch = '1';
+          window.__wantsTouch = true;
+          return;
+        }
+        const ua = (navigator.userAgent || '').toLowerCase();
+        const isMobile = /android|webos|iphone|ipad|ipod|blackberry|iemobile|opera mini|mobile/i.test(ua);
+        const isIpadOS = (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+        const isCoarseOnly = window.matchMedia &&
+          window.matchMedia('(pointer: coarse) and (hover: none)').matches;
+
+        const shouldEnableTouch = isMobile || isIpadOS || isCoarseOnly;
+        if (shouldEnableTouch) {
+          document.documentElement.dataset.isTouch = '1';
+          window.__wantsTouch = true;
+        } else {
+          document.documentElement.dataset.isTouch = '0';
+          window.__wantsTouch = false;
+        }
+      } catch (_) {
+        document.documentElement.dataset.isTouch = '0';
+        window.__wantsTouch = false;
       }
     })();
   </script>
   <!-- Touch Controls Overlay -->
-  <link rel="stylesheet" href="touch.css?v=152">
+  <link rel="stylesheet" href="touch.css?v=153">
   <style>
     html, body {
       margin: 0;
@@ -338,110 +363,147 @@
   <progress id="progress" hidden value="0" max="1"></progress>
   <div id="status" hidden aria-hidden="true"></div>
   <div id="tap-hint" hidden aria-hidden="true"></div>
-  <!-- Top bar status & mode toggles -->
-  <div class="touch-top-bar">
-    <button id="touch-toggle-btn" class="touch-bar-btn" title="Toggle On-Screen Touch Controls">📱 Touch</button>
-    <button id="veh-mode-toggle" class="touch-bar-btn veh-mode-btn" title="Toggle On-Foot / In-Car Controls">🚶 ON FOOT</button>
-  </div>
+  <!-- Mobile Touch Controls Wrapper (Active strictly on mobile devices or ?touch=1) -->
+  <div class="touch-controls-wrapper" id="touch-controls" aria-hidden="true">
+    <!-- Persistent Secondary Controls Toggle Button (Slot U: Safe Top-Right) -->
+    <button id="touch-btn-secondary" class="touch-persistent-btn" title="Secondary Actions" aria-label="Secondary Controls">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><circle cx="12" cy="5" r="2.2"/><circle cx="12" cy="12" r="2.2"/><circle cx="12" cy="19" r="2.2"/></svg>
+    </button>
 
-  <div class="touch-controls-wrapper" id="touch-controls">
-    <!-- Left Zone: Directional Movement Controls (D-Pad & Joystick) -->
-    <div id="touch-move">
-      <div class="touch-dpad" id="touch-dpad">
-        <div class="dpad-button dpad-up" data-dir="up" title="Forward (W)">
-          <svg viewBox="0 0 24 24"><path d="M12 4l-7 7h4v8h6v-8h4z"/></svg>
+    <!-- Secondary Controls Drawer (Directly below U) -->
+    <div id="touch-secondary-drawer" class="touch-drawer" hidden>
+      <div class="drawer-header">
+        <span class="drawer-title">Controls &amp; Actions</span>
+        <button id="drawer-close-btn" class="drawer-close" aria-label="Close Drawer">&times;</button>
+      </div>
+      <div class="drawer-grid" id="drawer-items">
+        <button class="drawer-btn" data-drawer-action="camera" id="drawer-btn-camera" title="Change Camera View (C)">
+          <span class="drawer-icon icon-camera"></span>
+          <span class="drawer-label">Camera</span>
+        </button>
+        <button class="drawer-btn" data-drawer-action="behind" id="drawer-btn-behind" title="Look Behind">
+          <span class="drawer-icon icon-behind"></span>
+          <span class="drawer-label">Behind</span>
+        </button>
+        <button class="drawer-btn" data-drawer-action="lookLeft" id="drawer-btn-look-left" title="Look Left (Q)">
+          <span class="drawer-icon icon-look-left"></span>
+          <span class="drawer-label">Look Left</span>
+        </button>
+        <button class="drawer-btn" data-drawer-action="lookRight" id="drawer-btn-look-right" title="Look Right (E)">
+          <span class="drawer-icon icon-look-right"></span>
+          <span class="drawer-label">Look Right</span>
+        </button>
+        <button class="drawer-btn" data-drawer-action="radio" id="drawer-btn-radio" title="Change Radio Station (R)">
+          <span class="drawer-icon icon-radio"></span>
+          <span class="drawer-label">Radio</span>
+        </button>
+        <button class="drawer-btn" data-drawer-action="job" id="drawer-btn-job" title="Toggle Sub-Mission (CapsLock)">
+          <span class="drawer-icon icon-job"></span>
+          <span class="drawer-label">Sub-Mission</span>
+        </button>
+        <button class="drawer-btn" data-drawer-action="settings" id="drawer-btn-settings" title="Touch Controls Settings">
+          <span class="drawer-icon icon-settings"></span>
+          <span class="drawer-label">Settings</span>
+        </button>
+      </div>
+      <div id="drawer-settings-panel" class="drawer-settings-panel" hidden>
+        <div class="setting-row">
+          <label for="touch-scale-slider">Control Size</label>
+          <div class="setting-ctrl">
+            <input type="range" id="touch-scale-slider" min="100" max="150" step="10" value="100">
+            <span id="touch-scale-val">100%</span>
+          </div>
         </div>
-        <div class="dpad-button dpad-left" data-dir="left" title="Left / Steer Left (A)">
-          <svg viewBox="0 0 24 24"><path d="M4 12l7-7v4h8v6h-8v4z"/></svg>
+        <div class="setting-row">
+          <label for="touch-opacity-slider">HUD Opacity</label>
+          <div class="setting-ctrl">
+            <input type="range" id="touch-opacity-slider" min="50" max="100" step="5" value="100">
+            <span id="touch-opacity-val">100%</span>
+          </div>
         </div>
-        <div class="dpad-center" id="dpad-center">
-          <div class="dpad-knob" id="dpad-knob"></div>
+        <div class="setting-row">
+          <label for="touch-left-handed">Left-Handed Mode</label>
+          <input type="checkbox" id="touch-left-handed">
         </div>
-        <div class="dpad-button dpad-right" data-dir="right" title="Right / Steer Right (D)">
-          <svg viewBox="0 0 24 24"><path d="M20 12l-7-7v4H5v6h8v4z"/></svg>
+        <button id="touch-reset-btn" class="drawer-setting-btn">Reset Defaults</button>
+      </div>
+    </div>
+
+    <!-- Persistent Left Movement / Steering Pad (Slot L: Safe Bottom-Left) -->
+    <div id="touch-move" class="touch-pad-container" aria-label="Movement and Steering Pad">
+      <div class="touch-pad-base" id="touch-move-base">
+        <!-- Sprint Outer Ring Indicator (Engages at radius >= 72dp) -->
+        <div class="sprint-zone-ring" id="sprint-zone-ring">
+          <span class="sprint-zone-label">SPRINT</span>
         </div>
-        <div class="dpad-button dpad-down" data-dir="down" title="Backward / Reverse (S)">
-          <svg viewBox="0 0 24 24"><path d="M12 20l7-7h-4V5H9v8H5z"/></svg>
+        <div class="touch-pad-knob" id="touch-move-knob"></div>
+      </div>
+    </div>
+
+    <!-- Turret Operation Pad (Slot T: Right side, for vehicle turret seat) -->
+    <div id="touch-turret-pad" class="touch-pad-container turret-pad" hidden aria-label="Turret Aim Pad">
+      <div class="touch-pad-base" id="touch-turret-base">
+        <div class="touch-pad-knob" id="touch-turret-knob"></div>
+      </div>
+    </div>
+
+    <!-- Background Camera Look Region (Right 55% of safe screen) -->
+    <div id="touch-look" aria-hidden="true"></div>
+
+    <!-- Contextual Action Buttons Cluster (Slots R0 through R6) -->
+    <div id="touch-action-cluster" class="touch-action-cluster">
+      <!-- R0: Primary Action (Fire / Aircraft Forward) -->
+      <button id="slot-r0" class="touch-slot slot-r0 primary-action" data-slot="R0" aria-label="Fire / Primary Action"></button>
+
+      <!-- R1: Aim / Handbrake / Aircraft Backwards -->
+      <button id="slot-r1" class="touch-slot slot-r1" data-slot="R1" aria-label="Target / Handbrake"></button>
+
+      <!-- R2: Jump / Horn / Fire -->
+      <button id="slot-r2" class="touch-slot slot-r2" data-slot="R2" aria-label="Jump / Horn"></button>
+
+      <!-- R3: Enter / Exit Vehicle -->
+      <button id="slot-r3" class="touch-slot slot-r3" data-slot="R3" aria-label="Enter or Exit Vehicle"></button>
+
+      <!-- R4: Weapon Selector (Opens modal weapon overlay) -->
+      <button id="slot-r4" class="touch-slot slot-r4" data-slot="R4" aria-label="Choose Weapon"></button>
+
+      <!-- R5: Zoom In / Horn -->
+      <button id="slot-r5" class="touch-slot slot-r5" data-slot="R5" aria-label="Zoom In"></button>
+
+      <!-- R6: Zoom Out / Exit -->
+      <button id="slot-r6" class="touch-slot slot-r6" data-slot="R6" aria-label="Zoom Out"></button>
+    </div>
+
+    <!-- Modal Weapon Overlay / Wheel (Opened by Slot R4) -->
+    <div id="touch-weapon-overlay" class="touch-weapon-overlay" hidden>
+      <div class="weapon-overlay-backdrop" id="weapon-overlay-backdrop"></div>
+      <div class="weapon-overlay-card">
+        <div class="weapon-overlay-header">
+          <span class="weapon-overlay-title">Select Weapon</span>
+          <button id="weapon-close-btn" class="weapon-close-btn" aria-label="Close">&times;</button>
+        </div>
+        <div class="weapon-grid" id="weapon-grid">
+          <!-- Weapon items injected dynamically with icons and names -->
+        </div>
+        <div class="weapon-overlay-controls">
+          <button id="weapon-prev-btn" class="weapon-nav-btn">&larr; Previous</button>
+          <span id="weapon-current-name" class="weapon-active-name">Fists</span>
+          <button id="weapon-next-btn" class="weapon-nav-btn">Next &rarr;</button>
         </div>
       </div>
     </div>
 
-    <!-- Right Zone: Camera look / swipe area -->
-    <div id="touch-look"></div>
-
-    <!-- ON-FOOT ONLY ACTION BUTTONS -->
-    <div class="touch-control run on-foot-only" title="Sprint (Shift)"></div>
-    <div class="touch-control jump on-foot-only" title="Jump (Space)"></div>
-    <div class="touch-control fist on-foot-only" title="Attack / Fire (Ctrl)"></div>
-    <div class="touch-control target on-foot-only" title="Target Lock (Del)"></div>
-
-    <!-- IN-CAR ONLY ACTION BUTTONS -->
-    <div class="touch-control gas in-car-only" title="Accelerate (W)"></div>
-    <div class="touch-control brake in-car-only" title="Brake / Reverse (S)"></div>
-    <div class="touch-control drift in-car-only" title="Handbrake (Space)"></div>
-    <div class="touch-control horn in-car-only" title="Horn / Siren (Shift)"></div>
-    <div class="touch-control radio in-car-only" title="Radio (R)"></div>
-    <div class="touch-control job in-car-only" title="Sub-Mission (Caps)"></div>
-    <div class="touch-control fireLeft in-car-only" title="Drive-By Left"></div>
-    <div class="touch-control fireRight in-car-only" title="Drive-By Right"></div>
-
-    <!-- UNIVERSAL BUTTONS -->
-    <div class="touch-control getIn" title="Enter / Exit Vehicle (F)"></div>
-    <div class="touch-control lookBehind" title="Look Behind"></div>
-    <div class="touch-control weapon" title="Next Weapon (Enter)"></div>
-    <div class="touch-control camera" title="Change Camera (C)"></div>
-    <div class="touch-control menu" title="Pause / Menu (Esc)"></div>
+    <!-- Portrait Orientation Warning Overlay (Mobile Only) -->
+    <div id="touch-orientation-warning" class="touch-orientation-warning" hidden>
+      <div class="orientation-icon">📱 ↷</div>
+      <div class="orientation-text">Please rotate your device to landscape</div>
+    </div>
   </div>
-  <script>
-    /* Ключ облачных сейвов из ?token=XXXXX: должен попасть в localStorage
-     * ДО загрузки jsdos-cloud-sdk.js — SDK читает js.cloud.sdk.v8.key
-     * в момент исполнения скрипта. */
-    (function () {
-      try {
-        var token = new URLSearchParams(location.search).get('token');
-        if (token) localStorage.setItem('js.cloud.sdk.v8.key', token.trim());
-      } catch (e) {}
-    })();
-  </script>
-  <script>
-    (function () {
-      try {
-        if (window.top && window.top !== window) {
-          window.top.postMessage("swg-ready", "*");
-        }
-      } catch (e) {}
-    })();
-  </script>
-  <script type="module">
-    import { agti } from "./gc.js";
-    window.agti = (instance, callback) => agti(instance, "https://hector.dos.zone/ws", callback);
-  </script>
-  <script>
-    document.getElementById('touch-toggle-btn')?.addEventListener('click', function (e) {
-      e.stopPropagation();
-      const cur = document.body.dataset.isTouch === '1';
-      document.body.dataset.isTouch = cur ? '0' : '1';
-      this.style.borderColor = cur ? 'rgba(255,255,255,0.2)' : '#38bdf8';
-      this.style.color = cur ? '#94a3b8' : '#38bdf8';
-    });
-
-    document.getElementById('veh-mode-toggle')?.addEventListener('click', function (e) {
-      e.stopPropagation();
-      const isCar = document.body.dataset.stateCar === '1';
-      const nextCar = !isCar;
-      document.body.dataset.stateMenu = '0';
-      document.body.dataset.stateCar = nextCar ? '1' : '0';
-      this.textContent = nextCar ? '🚗 IN CAR' : '🚶 ON FOOT';
-      if (typeof window.setVehicleMode === 'function') {
-        window.setVehicleMode(nextCar);
-      }
-    });
-  </script>
   <!-- Виртуальный геймпад: патчит navigator.getGamepads, отдавая
        mapping:"standard". Должен быть до game.js. -->
   <script src="gamepad-emulator.js?v=139"></script>
   <script src="jsdos-cloud-sdk.js?v=139"></script>
   <script src="index.js?v=139"></script>
-  <script src="game.js?v=152"></script>
+  <script src="game.js?v=153"></script>
 </body>
 </html>
