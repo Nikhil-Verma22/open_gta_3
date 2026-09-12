@@ -156,7 +156,7 @@
     })();
   </script>
   <!-- Touch Controls Overlay -->
-  <link rel="stylesheet" href="touch.css?v=153">
+  <link rel="stylesheet" href="touch.css?v=154">
   <style>
     html, body {
       margin: 0;
@@ -499,11 +499,35 @@
       <div class="orientation-text">Please rotate your device to landscape</div>
     </div>
   </div>
+  <script>
+    /* Ключ облачных сейвов из ?token=XXXXX: должен попасть в localStorage
+     * ДО загрузки jsdos-cloud-sdk.js — SDK читает js.cloud.sdk.v8.key
+     * в момент исполнения скрипта. */
+    (function () {
+      try {
+        var token = new URLSearchParams(location.search).get('token');
+        if (token) localStorage.setItem('js.cloud.sdk.v8.key', token.trim());
+      } catch (e) {}
+    })();
+  </script>
+  <script>
+    (function () {
+      try {
+        if (window.top && window.top !== window) {
+          window.top.postMessage("swg-ready", "*");
+        }
+      } catch (e) {}
+    })();
+  </script>
+  <script type="module">
+    import { agti } from "./gc.js";
+    window.agti = (instance, callback) => agti(instance, "https://hector.dos.zone/ws", callback);
+  </script>
   <!-- Виртуальный геймпад: патчит navigator.getGamepads, отдавая
        mapping:"standard". Должен быть до game.js. -->
   <script src="gamepad-emulator.js?v=139"></script>
   <script src="jsdos-cloud-sdk.js?v=139"></script>
   <script src="index.js?v=139"></script>
-  <script src="game.js?v=153"></script>
+  <script src="game.js?v=154"></script>
 </body>
 </html>
