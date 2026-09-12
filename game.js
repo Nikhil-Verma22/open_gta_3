@@ -1,4 +1,4 @@
-const BUILD_VERSION = 155;
+const BUILD_VERSION = 156;
 const DEFAULTS_RESET_VERSION = 140;
 const ASSET_CACHE_NAME = 'gta3-assets-v2';
 const PRELOAD_CONCURRENCY = 32;
@@ -45,6 +45,103 @@ const statusEl = document.getElementById('status');
 const progressEl = document.getElementById('progress');
 const tapHintEl = document.getElementById('tap-hint');
 const canvas = document.getElementById('canvas');
+
+function wantsTouchControls() {
+  const params = new URLSearchParams(location.search);
+  if (params.get('touch') === '0') return false;
+  if (params.get('touch') === '1' || window.__wantsTouch === true) return true;
+
+  const ua = (navigator.userAgent || '').toLowerCase();
+  const isMobile = /android|webos|iphone|ipad|ipod|blackberry|iemobile|opera mini|mobile/i.test(ua);
+  const isIpadOS = (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const isCoarseOnly = window.matchMedia &&
+    window.matchMedia('(pointer: coarse) and (hover: none)').matches;
+
+  return isMobile || isIpadOS || isCoarseOnly;
+}
+
+const isTouchDevice = wantsTouchControls();
+
+/* Emulated Pointer Lock for Touch Devices
+ * Mobile browsers do not support desktop document.requestPointerLock().
+ * Emscripten's GLFW calculateMouseEvent handler checks Browser.pointerLock to accumulate
+ * continuous movement deltas (movementX/movementY). When Browser.pointerLock is false,
+ * it resets mouseX/mouseY to client coordinates, which breaks 360-degree camera swiping.
+ */
+let isVirtualPointerLocked = false;
+const origPointerLockElement = Object.getOwnPropertyDescriptor(Document.prototype, 'pointerLockElement') ||
+  Object.getOwnPropertyDescriptor(document, 'pointerLockElement');
+
+try {
+  Object.defineProperty(document, 'pointerLockElement', {
+    get() {
+      if (isTouchDevice && isVirtualPointerLocked) {
+        return canvas || document.getElementById('canvas') || document.body;
+      }
+      if (origPointerLockElement && origPointerLockElement.get) {
+        return origPointerLockElement.get.call(document);
+      }
+      return null;
+    },
+    configurable: true
+  });
+} catch (err) {
+  console.warn('[regta3] Failed to define pointerLockElement getter:', err);
+}
+
+function enableVirtualPointerLock() {
+  if (!isTouchDevice) return;
+  if (!isVirtualPointerLocked) {
+    isVirtualPointerLocked = true;
+    try {
+      document.dispatchEvent(new Event('pointerlockchange'));
+    } catch (_) {}
+  }
+}
+
+function disableVirtualPointerLock() {
+  if (!isTouchDevice) return;
+  if (isVirtualPointerLocked) {
+    isVirtualPointerLocked = false;
+    try {
+      document.dispatchEvent(new Event('pointerlockchange'));
+    } catch (_) {}
+  }
+}
+
+if (canvas) {
+  const origRequestPointerLock = canvas.requestPointerLock ? canvas.requestPointerLock.bind(canvas) : null;
+  canvas.requestPointerLock = function() {
+    if (isTouchDevice) {
+      enableVirtualPointerLock();
+      return Promise.resolve();
+    }
+    if (origRequestPointerLock) {
+      try {
+        return origRequestPointerLock.call(this);
+      } catch (_) {}
+    }
+  };
+}
+
+/* [Controller] Method: 0 = CONTROL_STANDARD (mouse look camera),
+ * 1 = CONTROL_CLASSIC (console scheme, target lock).
+ * On mobile touch controls we enforce Method=0 so touch dragging/swiping
+ * freely rotates the camera around Claude / car just like in modern mobile 3D games. */
+function applyTouchControlMethod(ini) {
+  let res = ini || defaultRe3Ini;
+  if (/Method=\d+/i.test(res)) {
+    res = res.replace(/Method=\d+/i, 'Method=0');
+  } else {
+    res += '\n[Controller]\nMethod=0\n';
+  }
+  if (/DisableMouseSteering=\d+/i.test(res)) {
+    res = res.replace(/DisableMouseSteering=\d+/i, 'DisableMouseSteering=1');
+  } else {
+    res += 'DisableMouseSteering=1\n';
+  }
+  return res;
+}
 
 const defaultRe3Ini = `[VideoMode]
 Width=1280
@@ -103,6 +200,7 @@ function sanitizeRe3Ini(ini) {
   out = out.replace(/MusicVolume=\d+/i, 'MusicVolume=64');
   if (!/SfxVolume=/i.test(out)) out += '\nSfxVolume=64\n';
   if (!/MusicVolume=/i.test(out)) out += '\nMusicVolume=64\n';
+  out = applyTouchControlMethod(out);
   return out;
 }
 let re3Ini = sanitizeRe3Ini(localStorage.getItem('regta3dos.re3.ini') || defaultRe3Ini);
@@ -143,16 +241,7 @@ function applyLanguageOverride(ini) {
   return ini + '\n[General]\n' + line + '\n';
 }
 
-/* [Controller] Method: 0 = CONTROL_STANDARD (мышиная камера, свободный
- * прицел), 1 = CONTROL_CLASSIC (консольная схема, захват цели). На тач
- * играбельна только вторая. C++ выставляет то же самое сам
- * (regta3_js_is_touch в glfw.cpp/Frontend.cpp) — здесь для того, чтобы
- * меню и сохранённый ini показывали правду. */
-function applyTouchControlMethod(ini) {
-  const want = isTouchDevice ? 1 : 0;
-  if (/Method=\d+/i.test(ini)) return ini.replace(/Method=\d+/i, 'Method=' + want);
-  return ini + '\n[Controller]\nMethod=' + want + '\n';
-}
+/* Controller Method management is declared at the top of game.js */
 let bootStarted = false;
 let audioUnlocked = false;
 let worldLoadComplete = false;
@@ -1297,21 +1386,7 @@ function prefetchFirstMissionAudio() {
  * на <body>, а CSS перекрашивает и переставляет те же самые div'ы.
  * Подробности — touch-controls/TOUCH_CONTROLS.md. */
 
-function wantsTouchControls() {
-  const params = new URLSearchParams(location.search);
-  if (params.get('touch') === '0') return false;
-  if (params.get('touch') === '1' || window.__wantsTouch === true) return true;
-
-  const ua = (navigator.userAgent || '').toLowerCase();
-  const isMobile = /android|webos|iphone|ipad|ipod|blackberry|iemobile|opera mini|mobile/i.test(ua);
-  const isIpadOS = (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-  const isCoarseOnly = window.matchMedia &&
-    window.matchMedia('(pointer: coarse) and (hover: none)').matches;
-
-  return isMobile || isIpadOS || isCoarseOnly;
-}
-
-const isTouchDevice = wantsTouchControls();
+/* wantsTouchControls and isTouchDevice are declared at the top of game.js */
 
 const TOUCH_BTN = {
   A: 0, B: 1, X: 2, Y: 3,
@@ -1800,7 +1875,7 @@ function initTurretPad() {
   container.addEventListener('pointercancel', onEnd);
 }
 
-/* Background Camera Dragging (Right 55% of safe screen) */
+/* Background Camera Dragging (Screen Background outside buttons) */
 function initTouchLook() {
   const lookArea = document.getElementById('touch-look');
   if (!lookArea) return;
@@ -1811,41 +1886,48 @@ function initTouchLook() {
   lookArea.addEventListener('pointerdown', (e) => {
     // If directional look is currently being held in drawer, ignore camera drag
     if (isLookHolding) return;
+    if (document.body.dataset.stateMenu === '1') return;
+
     e.preventDefault();
     lookPointerId = e.pointerId;
     lastX = e.clientX;
     lastY = e.clientY;
+    enableVirtualPointerLock();
     try { lookArea.setPointerCapture(e.pointerId); } catch (_) {}
   });
 
   lookArea.addEventListener('pointermove', (e) => {
     if (e.pointerId === lookPointerId) {
       if (isLookHolding) return;
+      if (document.body.dataset.stateMenu === '1') return;
+
       e.preventDefault();
       const dx = e.clientX - lastX;
       const dy = e.clientY - lastY;
       lastX = e.clientX;
       lastY = e.clientY;
 
-      if (canvas && (dx !== 0 || dy !== 0)) {
+      if (dx === 0 && dy === 0) return;
+      enableVirtualPointerLock();
+
+      // Sensitivity tuning:
+      // In GTA 3 PC HorizantalMouseSens is 0.0025. A multiplier of 2.0 provides
+      // smooth 1:1 rotation matching standard mobile FPS/3rd-person camera controls.
+      const SENSITIVITY_X = 2.0;
+      const SENSITIVITY_Y = 2.0;
+      const movementX = dx * SENSITIVITY_X;
+      const movementY = dy * SENSITIVITY_Y;
+
+      if (canvas) {
         const mouseEv = new MouseEvent('mousemove', {
           bubbles: true,
           cancelable: true,
           clientX: e.clientX,
           clientY: e.clientY,
-          movementX: dx * 1.5,
-          movementY: dy * 1.5
+          movementX: movementX,
+          movementY: movementY
         });
         canvas.dispatchEvent(mouseEv);
-      }
-
-      if (touchEmulator && touchPadIndex >= 0) {
-        const rx = Math.max(-1, Math.min(1, dx / 18));
-        const ry = Math.max(-1, Math.min(1, dy / 18));
-        try {
-          touchEmulator.MoveAxis(touchPadIndex, 2, rx);
-          touchEmulator.MoveAxis(touchPadIndex, 3, ry);
-        } catch (_) {}
       }
     }
   });
@@ -1854,12 +1936,6 @@ function initTouchLook() {
     if (e.pointerId === lookPointerId) {
       try { lookArea.releasePointerCapture(e.pointerId); } catch (_) {}
       lookPointerId = null;
-      if (touchEmulator && touchPadIndex >= 0) {
-        try {
-          touchEmulator.MoveAxis(touchPadIndex, 2, 0);
-          touchEmulator.MoveAxis(touchPadIndex, 3, 0);
-        } catch (_) {}
-      }
     }
   };
 
@@ -2418,6 +2494,9 @@ function setTouchState(flags) {
   if (flags & (1 << 0)) {
     mainMenuLoaded = true;
     hideEngineStartingSpinner();
+    if (isTouchDevice) disableVirtualPointerLock();
+  } else {
+    if (isTouchDevice) enableVirtualPointerLock();
   }
   const ds = document.body.dataset;
   let changed = false;
@@ -2472,8 +2551,8 @@ const Module = {
    * -1 — параметра нет, иначе 0..7. При явном ?lang= C++ не форсит русский
    * поверх значения из re3.ini (см. CMenuManager::LoadSettings). */
   regta3LanguageOverride: languageOverride === null ? 0 : languageOverride,
-  /* regta3_js_is_touch: на тач-устройстве C++ выбирает CONTROL_CLASSIC. */
-  regta3IsTouch: isTouchDevice,
+  /* regta3_js_is_touch: false ensures C++ keeps Method=0 (CONTROL_STANDARD) for mouse-look. */
+  regta3IsTouch: false,
   /* regta3_js_touch_state: маска состояния игры → data-state-* на <body>. */
   setTouchState,
   locateFile(path) {

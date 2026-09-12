@@ -204,17 +204,21 @@ body:not([data-is-touch="1"]) .touch-top-bar {
 }
 
 /* ==========================================================================
-   6. BACKGROUND CAMERA LOOK REGION (Right 55% of Safe Screen)
+   6. BACKGROUND CAMERA LOOK REGION (Full Screen Background outside controls)
    ========================================================================== */
 #touch-look {
   position: absolute;
-  top: 0;
-  right: 0;
-  width: 55vw;
+  inset: 0;
+  width: 100vw;
   height: 100vh;
   z-index: 80;
   pointer-events: auto;
   touch-action: none;
+}
+
+[data-state-menu="1"] #touch-look {
+  display: none !important;
+  pointer-events: none !important;
 }
 
 /* ==========================================================================
