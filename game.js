@@ -490,6 +490,14 @@ function maybeAutoEnter(line) {
  * Called once when GS_FRONTEND is detected. Runs in background with low concurrency
  * so it doesn't starve the main game loop. Uses the same prefetchAssetAsync mechanism
  * which writes files to VFS and OPFS cache. */
+/* Background prefetch of ALL remaining game assets from stream_files.list.
+ * Runs in background with controlled concurrency (4 workers) and yields to
+ * the event loop so it never starves the main thread or causes stutter in WASM.
+ * Caches all models, collisions, textures, vehicles, peds, and audio into:
+ *  1. Module.FS (virtual filesystem)
+ *  2. assetDataCache (in-memory Map)
+ *  3. CacheStorage (offline browser cache)
+ */
 let worldStreamDone = 0;
 let worldStreamTotal = 0;
 async function prefetchWorldModels() {
@@ -508,23 +516,80 @@ async function prefetchWorldModels() {
   }
   if (!lines.length) return;
   worldStreamTotal = lines.length;
-  if (typeof window.remoteLog === 'function') window.remoteLog('INFO', 'STREAM', 'Queuing ' + worldStreamTotal + ' world DFF models for background prefetch');
-  /* Pump in small batches so the page stays responsive */
-  let i = 0;
-  const BATCH = 8;
-  const pump = () => {
-    for (let n = 0; n < BATCH && i < lines.length; n++, i++) {
-      const rel = lines[i].replace(/^gta3-assets\/local\//i, '');
-      prefetchAssetAsync(rel);
+  if (typeof window.remoteLog === 'function') {
+    window.remoteLog('INFO', 'STREAM', `Starting background prefetch of ${worldStreamTotal} assets (data, textures, vehicles, peds, models, audio)`);
+  }
+
+  const STREAM_CONCURRENCY = 4;
+  let cursor = 0;
+  let cachedBytes = 0;
+
+  async function streamWorker() {
+    while (cursor < lines.length) {
+      const idx = cursor++;
+      const line = lines[idx];
+      const rel = line.replace(/^gta3-assets\/local\//i, '');
+      const nKey = normalizeAssetRel(rel);
+
+      const Module = window.Module;
+      const vfsExists = Module && Module.FS && (vfsPathExists(Module, `/${ASSET_PREFIX}/${rel}`) || vfsPathExists(Module, `/${rel}`));
+      const isMemoryCached = assetDataCache.has(nKey);
+
+      if (!vfsExists || !isMemoryCached) {
+        if (!shouldAvoidNetworkForAsset(rel) && !assetNotFound.has(nKey)) {
+          try {
+            const { rel: usedRel, data } = await fetchFirstAvailable(assetCandidates(rel));
+            cacheAssetData(usedRel, data);
+            cacheAssetData(rel, data);
+            cachedBytes += data.length || 0;
+
+            if (Module && Module.FS) {
+              try { writeAssetToFs(Module, `${ASSET_PREFIX}/${usedRel}`, data); } catch (_) {}
+              if (usedRel !== rel) {
+                try { writeAssetToFs(Module, `${ASSET_PREFIX}/${rel}`, data); } catch (_) {}
+              }
+              const imgMatch = usedRel.match(/^(models)\/gta3\.img\/([^/]+)$/i);
+              if (imgMatch) {
+                const aliasRel = `${imgMatch[1]}/${imgMatch[2]}`;
+                try {
+                  writeAssetToFs(Module, `${ASSET_PREFIX}/${aliasRel}`, data);
+                  writeAssetToFs(Module, aliasRel, data);
+                } catch (_) {}
+                cacheAssetData(aliasRel, data);
+              }
+            }
+          } catch (err) {
+            if (err && err.isPermanentNotFound) {
+              assetNotFound.add(nKey);
+            }
+          }
+        }
+      }
+
+      worldStreamDone = cursor;
+
+      if (cursor % 250 === 0 || cursor === lines.length) {
+        const mb = (cachedBytes / (1024 * 1024)).toFixed(1);
+        const logMsg = `Background streaming: ${cursor}/${worldStreamTotal} files processed (${mb} MB cached)`;
+        console.log(`[regta3] ${logMsg}`);
+        if (typeof window.remoteLog === 'function') window.remoteLog('INFO', 'STREAM', logMsg);
+      }
+
+      // Yield briefly to event loop between downloads so main thread and WASM stay 60fps
+      await new Promise(r => setTimeout(r, 12));
     }
-    worldStreamDone = i;
-    if (i < lines.length) {
-      setTimeout(pump, 20);
-    } else {
-      if (typeof window.remoteLog === 'function') window.remoteLog('INFO', 'STREAM', 'All ' + worldStreamTotal + ' world DFF models queued');
-    }
-  };
-  setTimeout(pump, 500);
+  }
+
+  const workers = [];
+  for (let w = 0; w < STREAM_CONCURRENCY; w++) {
+    workers.push(streamWorker());
+  }
+  await Promise.all(workers);
+
+  if (typeof window.remoteLog === 'function') {
+    const totalMb = (cachedBytes / (1024 * 1024)).toFixed(1);
+    window.remoteLog('INFO', 'STREAM', `Background prefetch COMPLETE: all ${worldStreamTotal} assets cached (${totalMb} MB)`);
+  }
 }
 
 function updateStatusFromRegta3(line) {
@@ -800,12 +865,15 @@ async function fetchAsset(relPath, onProgress) {
   }
   const nKey = normalizeAssetRel(relPath);
   if (nKey === 'audio/sfx.raw' || nKey.endsWith('/sfx.raw')) {
-    throw new Error(`asset ${relPath}: directory, not a file`);
+    const err = new Error(`asset ${relPath}: directory, not a file`);
+    err.isPermanentNotFound = true;
+    throw err;
   }
   const bases = ASSET_BASES_WORKING;
   const cache = await getCacheStorage();
   
   let lastErr;
+  let allPermanentNotFound = true;
   for (const base of bases) {
     const url = base + relPath;
     try {
@@ -820,11 +888,52 @@ async function fetchAsset(relPath, onProgress) {
           }
         } catch (_) {}
       }
-      const res = await fetch(url);
-      if (!res.ok) {
-        lastErr = new Error(`asset ${relPath}: HTTP ${res.status}`);
+
+      // Retry up to 3 times per base URL with exponential backoff and timeout
+      const MAX_RETRIES = 3;
+      let res = null;
+      let attemptErr = null;
+      for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+        if (attempt > 0) {
+          await new Promise(r => setTimeout(r, 200 * Math.pow(2, attempt - 1)));
+        }
+        try {
+          let timer = null;
+          let fetchSignal = undefined;
+          if (typeof AbortController !== 'undefined') {
+            const controller = new AbortController();
+            timer = setTimeout(() => {
+              try { controller.abort(); } catch (_) {}
+            }, 12000);
+            fetchSignal = controller.signal;
+          }
+          res = await fetch(url, fetchSignal ? { signal: fetchSignal } : {});
+          if (timer) clearTimeout(timer);
+
+          if (res.status === 404 || res.status === 410) {
+            attemptErr = new Error(`asset ${relPath}: HTTP ${res.status}`);
+            attemptErr.isPermanentNotFound = true;
+            break; // Permanent 404, do not retry this base URL
+          }
+          if (!res.ok) {
+            attemptErr = new Error(`asset ${relPath}: HTTP ${res.status}`);
+            allPermanentNotFound = false;
+            continue;
+          }
+          attemptErr = null;
+          break; // Success
+        } catch (fetchErr) {
+          attemptErr = fetchErr;
+          allPermanentNotFound = false;
+        }
+      }
+
+      if (attemptErr || !res || !res.ok) {
+        lastErr = attemptErr || new Error(`asset ${relPath}: fetch failed`);
+        if (!attemptErr || !attemptErr.isPermanentNotFound) allPermanentNotFound = false;
         continue;
       }
+
       const data = await readResponseBytes(res, onProgress);
       cacheAssetData(relPath, data);
       if (cache) {
@@ -838,9 +947,14 @@ async function fetchAsset(relPath, onProgress) {
       return data;
     } catch (err) {
       lastErr = err;
+      if (!err || !err.isPermanentNotFound) allPermanentNotFound = false;
     }
   }
-  throw lastErr ?? new Error(`asset ${relPath}: fetch failed`);
+  const finalErr = lastErr ?? new Error(`asset ${relPath}: fetch failed`);
+  if (allPermanentNotFound && lastErr && lastErr.isPermanentNotFound) {
+    finalErr.isPermanentNotFound = true;
+  }
+  throw finalErr;
 }
 
 async function runPool(items, concurrency, workerFn) {
@@ -949,14 +1063,20 @@ function assetCandidates(rel) {
 
 async function fetchFirstAvailable(candidates, onProgress) {
   let lastErr;
+  let allPermanentNotFound = true;
   for (const rel of candidates) {
     try {
       return { rel, data: await fetchAsset(rel, onProgress) };
     } catch (err) {
       lastErr = err;
+      if (!err || !err.isPermanentNotFound) allPermanentNotFound = false;
     }
   }
-  throw lastErr ?? new Error('no asset candidates');
+  const finalErr = lastErr ?? new Error('no asset candidates');
+  if (allPermanentNotFound && lastErr && lastErr.isPermanentNotFound) {
+    finalErr.isPermanentNotFound = true;
+  }
+  throw finalErr;
 }
 
 function vfsPathExists(Module, vfsPath) {
@@ -1218,8 +1338,12 @@ function prefetchAssetAsync(rel) {
         try { writeAssetToFs(Module, `${ASSET_PREFIX}/${resolved}`, data); } catch (_) {}
       }
     }
-  }).catch(() => {
-    assetNotFound.add(nKey);
+  }).catch((err) => {
+    if (err && err.isPermanentNotFound) {
+      assetNotFound.add(nKey);
+    }
+  }).finally(() => {
+    prefetchPending.delete(nKey);
   });
 }
 
@@ -1239,7 +1363,16 @@ function loadAsyncFile(vfsPath) {
   const p = loadAsyncFileInner(vfsPath)
     .catch(() => false)
     .then((ok) => {
-      asyncFileStatus.set(key, ok ? 'ok' : 'notfound');
+      if (ok) {
+        asyncFileStatus.set(key, 'ok');
+      } else {
+        const rel = normalizeAssetRel(String(vfsPath).replace(/^\/+/, '').replace(/^gta3-assets\/local\//i, ''));
+        if (assetNotFound.has(rel) || shouldAvoidNetworkForAsset(rel)) {
+          asyncFileStatus.set(key, 'notfound');
+        } else {
+          asyncFileStatus.delete(key); // Allow retry on transient errors
+        }
+      }
       return ok;
     })
     .finally(() => loadAsyncFilePending.delete(key));
@@ -1313,7 +1446,9 @@ async function loadAsyncFileInner(vfsPath) {
     }
     return true;
   } catch (err) {
-    assetNotFound.add(normalizeAssetRel(rel));
+    if (err && err.isPermanentNotFound) {
+      assetNotFound.add(normalizeAssetRel(rel));
+    }
     console.warn('[regta3] loadAsyncFile miss:', rel, err && err.message ? err.message : err);
     return false;
   }
@@ -1397,6 +1532,8 @@ function prefetchFirstMissionAudio() {
 
 let touchEmulator = null;
 let touchPadIndex = 0;
+const steerPointers = { left: new Set(), right: new Set() };
+let updateSteering = function () {};
 
 /* Authoritative C++ Game State Bitmask Handler */
 const TOUCH_STATE_BITS = [
@@ -1436,6 +1573,9 @@ function releaseAllTouchInputs() {
       }
     } catch (_) {}
   }
+  steerPointers.left.clear();
+  steerPointers.right.clear();
+  try { updateSteering(); } catch (_) {}
 }
 
 function installTouchControls() {
@@ -1474,6 +1614,7 @@ function installTouchControls() {
     let startX = 0, startY = 0;
 
     moveEl.addEventListener('pointerdown', (e) => {
+      if (document.body.dataset.stateCar === '1') return;
       movePointerId = e.pointerId;
       startX = e.clientX;
       startY = e.clientY;
@@ -1561,6 +1702,61 @@ function installTouchControls() {
   ];
 
   touchEmulator.AddDisplayButtonEventListeners(touchPadIndex, buttonConfigs);
+
+  // Steer Left / Right Arrow Buttons (< and >) for Vehicle Mode
+  const steerLeftEl = document.querySelector('.touch-control.left');
+  const steerRightEl = document.querySelector('.touch-control.right');
+
+  updateSteering = function () {
+    if (!touchEmulator || touchPadIndex === undefined || touchPadIndex === null) return;
+    const isLeft = steerPointers.left.size > 0;
+    const isRight = steerPointers.right.size > 0;
+
+    let axisX = 0;
+    if (isLeft && !isRight) axisX = -1.0;
+    else if (isRight && !isLeft) axisX = 1.0;
+
+    try {
+      // Axis 0: Left Stick X (-1.0 = left, +1.0 = right)
+      touchEmulator.MoveAxis(touchPadIndex, 0, axisX);
+      // Button 14: DPAD_LEFT, Button 15: DPAD_RIGHT
+      touchEmulator.PressButton(touchPadIndex, 14, isLeft ? 1 : 0, isLeft);
+      touchEmulator.PressButton(touchPadIndex, 15, isRight ? 1 : 0, isRight);
+    } catch (_) {}
+
+    if (steerLeftEl) steerLeftEl.classList.toggle('pressed', isLeft);
+    if (steerRightEl) steerRightEl.classList.toggle('pressed', isRight);
+  };
+
+  function bindSteerBtn(el, side) {
+    if (!el) return;
+    el.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      try { el.setPointerCapture(e.pointerId); } catch (_) {}
+      steerPointers[side].add(e.pointerId);
+      updateSteering();
+    }, { passive: false });
+
+    const onPointerEnd = (e) => {
+      if (steerPointers[side].has(e.pointerId)) {
+        steerPointers[side].delete(e.pointerId);
+        try { el.releasePointerCapture(e.pointerId); } catch (_) {}
+        updateSteering();
+      }
+    };
+
+    el.addEventListener('pointerup', onPointerEnd);
+    el.addEventListener('pointercancel', onPointerEnd);
+    el.addEventListener('pointerleave', (e) => {
+      if (!el.hasPointerCapture || !el.hasPointerCapture(e.pointerId)) {
+        onPointerEnd(e);
+      }
+    });
+  }
+
+  bindSteerBtn(steerLeftEl, 'left');
+  bindSteerBtn(steerRightEl, 'right');
 
   // Safety release on blur / hidden
   window.addEventListener('blur', releaseAllTouchInputs);
@@ -1991,6 +2187,9 @@ const Module = {
     }
     // Тёплый старт для тяжёлых архивов: качаем cuts.img фоном, пока игрок в меню.
     prefetchAssetAsync('anim/cuts.img');
+    setTimeout(() => {
+      prefetchWorldModels().catch(err => console.warn('[regta3] prefetchWorldModels err:', err));
+    }, 1000);
   },
   onAbort(what) {
     showDiagError('WASM abort: ' + what + '\n[frame: ' + frameIndex + ', sync calls: ' + syncCallCount + ']\n' + syncCallLog.slice(-10).join('\n'));
