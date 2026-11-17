@@ -124,16 +124,18 @@ if (canvas) {
   };
 }
 
-/* [Controller] Method: 0 = CONTROL_STANDARD (mouse look camera),
- * 1 = CONTROL_CLASSIC (console scheme, target lock).
- * On mobile touch controls we enforce Method=0 so touch dragging/swiping
- * freely rotates the camera around Claude / car just like in modern mobile 3D games. */
+/* [Controller] Method: 0 = CONTROL_STANDARD (mouse look camera, PC desktop),
+ * 1 = CONTROL_CLASSIC (gamepad / mobile touchscreen with GamepadEmulator).
+ * In re3, Method=1 is required on mobile touch devices so the game reads
+ * emulated Gamepad left stick (movement/steering) and right stick (camera look)
+ * as well as analog gamepad buttons. On PC desktop, Method=0 is used. */
 function applyTouchControlMethod(ini) {
   let res = ini || defaultRe3Ini;
+  const targetMethod = isTouchDevice ? 'Method=1' : 'Method=0';
   if (/Method=\d+/i.test(res)) {
-    res = res.replace(/Method=\d+/i, 'Method=0');
+    res = res.replace(/Method=\d+/i, targetMethod);
   } else {
-    res += '\n[Controller]\nMethod=0\n';
+    res += `\n[Controller]\n${targetMethod}\n`;
   }
   if (/DisableMouseSteering=\d+/i.test(res)) {
     res = res.replace(/DisableMouseSteering=\d+/i, 'DisableMouseSteering=1');
@@ -1389,698 +1391,12 @@ function prefetchFirstMissionAudio() {
 /* wantsTouchControls and isTouchDevice are declared at the top of game.js */
 
 /* ==========================================================================
- * GTA III 10TH ANNIVERSARY MOBILE CONTROLS SYSTEM
- * Authentic 2011 iOS/Android control layer for Open GTA III (re3.wasm)
+ * GTA III MOBILE TOUCH CONTROLS (ze-man/gta-3 architecture)
+ * GamepadEmulator.js + Gamepad API Method=1 + Authentic SVG UI Icons
  * ========================================================================== */
 
-const TOUCH_BTN = {
-  A: 0, B: 1, X: 2, Y: 3,
-  LB: 4, RB: 5, LT: 6, RT: 7,
-  BACK: 8, START: 9, L3: 10, R3: 11,
-  DPAD_UP: 12, DPAD_DOWN: 13, DPAD_LEFT: 14, DPAD_RIGHT: 15,
-};
-
 let touchEmulator = null;
-let touchPadIndex = -1;
-
-const ControlState = {
-  ON_FOOT: 'ON_FOOT',
-  DRIVING: 'DRIVING',
-  DRIVE_BY: 'DRIVE_BY',
-  SPECIAL_VEHICLE: 'SPECIAL_VEHICLE',
-  MENU: 'MENU',
-};
-
-/**
- * MobileControlState: Tracks reference-counted input actions and translates
- * them into KeyboardEvents, MouseEvents, and GamepadEmulator actions.
- */
-class MobileControlState {
-  constructor() {
-    this.actionSources = new Map();
-    this.activeActions = new Set();
-    this.joyX = 0;
-    this.joyY = 0;
-    this.joyPwmTimer = null;
-    this.joyTick = 0;
-    this.joyTarget = { yAction: null, xAction: null, pctY: 0, pctX: 0 };
-
-    this.keyDefinitions = {
-      forward: {
-        keys: [{ key: 'w', code: 'KeyW', keyCode: 87 }, { key: 'ArrowUp', code: 'ArrowUp', keyCode: 38 }]
-      },
-      reverse: {
-        keys: [{ key: 's', code: 'KeyS', keyCode: 83 }, { key: 'ArrowDown', code: 'ArrowDown', keyCode: 40 }]
-      },
-      steerLeft: {
-        keys: [{ key: 'a', code: 'KeyA', keyCode: 65 }, { key: 'ArrowLeft', code: 'ArrowLeft', keyCode: 37 }],
-        gpBtn: TOUCH_BTN.DPAD_LEFT
-      },
-      steerRight: {
-        keys: [{ key: 'd', code: 'KeyD', keyCode: 68 }, { key: 'ArrowRight', code: 'ArrowRight', keyCode: 39 }],
-        gpBtn: TOUCH_BTN.DPAD_RIGHT
-      },
-      pedalGas: {
-        keys: [{ key: 'w', code: 'KeyW', keyCode: 87 }, { key: 'ArrowUp', code: 'ArrowUp', keyCode: 38 }],
-        gpBtn: TOUCH_BTN.A
-      },
-      pedalBrake: {
-        keys: [{ key: 's', code: 'KeyS', keyCode: 83 }, { key: 'ArrowDown', code: 'ArrowDown', keyCode: 40 }],
-        gpBtn: TOUCH_BTN.X
-      },
-      attack: {
-        keys: [{ key: 'Control', code: 'ControlLeft', keyCode: 17 }, { key: '0', code: 'Numpad0', keyCode: 96 }],
-        gpBtn: TOUCH_BTN.B
-      },
-      jump: {
-        keys: [{ key: ' ', code: 'Space', keyCode: 32 }],
-        gpBtn: TOUCH_BTN.X
-      },
-      sprint: {
-        keys: [{ key: 'Shift', code: 'ShiftLeft', keyCode: 16 }],
-        gpBtn: TOUCH_BTN.A
-      },
-      enterExit: {
-        keys: [{ key: 'f', code: 'KeyF', keyCode: 70 }, { key: 'Enter', code: 'Enter', keyCode: 13 }],
-        gpBtn: TOUCH_BTN.Y
-      },
-      handbrake: {
-        keys: [{ key: ' ', code: 'Space', keyCode: 32 }],
-        gpBtn: TOUCH_BTN.RB
-      },
-      horn: {
-        keys: [{ key: 'Shift', code: 'ShiftLeft', keyCode: 16 }],
-        gpBtn: TOUCH_BTN.L3
-      },
-      radio: {
-        keys: [{ key: 'r', code: 'KeyR', keyCode: 82 }, { key: 'Insert', code: 'Insert', keyCode: 45 }],
-        gpBtn: TOUCH_BTN.LB
-      },
-      job: {
-        keys: [{ key: 'CapsLock', code: 'CapsLock', keyCode: 20 }, { key: '+', code: 'NumpadAdd', keyCode: 107 }],
-        gpBtn: TOUCH_BTN.R3
-      },
-      camera: {
-        keys: [{ key: 'v', code: 'KeyV', keyCode: 86 }, { key: 'c', code: 'KeyC', keyCode: 67 }, { key: 'Home', code: 'Home', keyCode: 36 }],
-        gpBtn: TOUCH_BTN.BACK
-      },
-      lookLeft: {
-        keys: [{ key: 'q', code: 'KeyQ', keyCode: 81 }, { key: '4', code: 'Numpad4', keyCode: 100 }]
-      },
-      lookRight: {
-        keys: [{ key: 'e', code: 'KeyE', keyCode: 69 }, { key: '2', code: 'Numpad2', keyCode: 98 }]
-      },
-      lookBehind: {
-        keys: [{ key: 'CapsLock', code: 'CapsLock', keyCode: 20 }, { key: '.', code: 'NumpadDecimal', keyCode: 110 }]
-      },
-      weaponNext: {
-        keys: [{ key: 'Enter', code: 'Enter', keyCode: 13 }],
-        gpBtn: TOUCH_BTN.RT
-      },
-      weaponPrev: {
-        keys: [{ key: '.', code: 'NumpadDecimal', keyCode: 110 }]
-      },
-      menu: {
-        keys: [{ key: 'Escape', code: 'Escape', keyCode: 27 }],
-        gpBtn: TOUCH_BTN.START
-      }
-    };
-  }
-
-  set(actionName, sourceId, isDown) {
-    if (!this.actionSources.has(actionName)) {
-      this.actionSources.set(actionName, new Set());
-    }
-    const sources = this.actionSources.get(actionName);
-    const wasActive = sources.size > 0;
-
-    if (isDown) {
-      sources.add(sourceId);
-    } else {
-      sources.delete(sourceId);
-    }
-
-    const isActive = sources.size > 0;
-    if (isActive !== wasActive) {
-      if (isActive) {
-        this.activeActions.add(actionName);
-      } else {
-        this.activeActions.delete(actionName);
-      }
-      this._applyActionState(actionName, isActive);
-    }
-  }
-
-  tap(actionName) {
-    this.set(actionName, 'tap', true);
-    setTimeout(() => this.set(actionName, 'tap', false), 50);
-  }
-
-  /**
-   * Smart Quadrant / Angular PWM Joystick:
-   * Calculates the exact angle & quadrant percentage and pulses the quadrant keys proportionally
-   * (e.g. 60% forward, 40% right duty cycle) for smooth analog-like walking.
-   */
-  setJoystick(nx, ny) {
-    this.joyX = nx;
-    this.joyY = ny;
-
-    if (touchEmulator && touchPadIndex >= 0) {
-      try {
-        touchEmulator.MoveAxis(touchPadIndex, 0, nx);
-        touchEmulator.MoveAxis(touchPadIndex, 1, ny);
-      } catch (_) {}
-    }
-
-    const mag = Math.hypot(nx, ny);
-    const deadzone = 0.18;
-    if (mag < deadzone) {
-      this.resetJoystick();
-      return;
-    }
-
-    // Determine target quadrant actions
-    const yAction = ny < 0 ? 'forward' : 'reverse';
-    const xAction = nx < 0 ? 'steerLeft' : 'steerRight';
-    const oppY = ny < 0 ? 'reverse' : 'forward';
-    const oppX = nx < 0 ? 'steerRight' : 'steerLeft';
-
-    // Instantly release opposing axes
-    this.set(oppY, 'joy_pwm', false);
-    this.set(oppX, 'joy_pwm', false);
-
-    const absX = Math.abs(nx);
-    const absY = Math.abs(ny);
-    const total = absX + absY;
-    const pctY = total > 0 ? (absY / total) : 0;
-    const pctX = total > 0 ? (absX / total) : 0;
-
-    this.joyTarget = { yAction, xAction, pctY, pctX };
-
-    if (!this.joyPwmTimer) {
-      this.joyTick = 0;
-      this._pwmStep();
-      this.joyPwmTimer = setInterval(() => this._pwmStep(), 12);
-    } else {
-      this._pwmStep();
-    }
-  }
-
-  _pwmStep() {
-    const t = this.joyTarget;
-    if (!t || (!t.yAction && !t.xAction)) return;
-
-    // 10-step duty cycle (12ms * 10 = 120ms total cycle)
-    const step = (this.joyTick++) % 10;
-    const ySteps = Math.round(t.pctY * 10);
-    const xSteps = Math.round(t.pctX * 10);
-
-    const isYDown = step < ySteps;
-    const isXDown = step >= (10 - xSteps);
-
-    if (t.yAction) this.set(t.yAction, 'joy_pwm', isYDown);
-    if (t.xAction) this.set(t.xAction, 'joy_pwm', isXDown);
-  }
-
-  resetJoystick() {
-    if (this.joyPwmTimer) {
-      clearInterval(this.joyPwmTimer);
-      this.joyPwmTimer = null;
-    }
-    this.joyTick = 0;
-    this.joyTarget = { yAction: null, xAction: null, pctY: 0, pctX: 0 };
-    this.joyX = 0;
-    this.joyY = 0;
-
-    if (touchEmulator && touchPadIndex >= 0) {
-      try {
-        touchEmulator.MoveAxis(touchPadIndex, 0, 0);
-        touchEmulator.MoveAxis(touchPadIndex, 1, 0);
-      } catch (_) {}
-    }
-
-    this.set('forward', 'joy_pwm', false);
-    this.set('reverse', 'joy_pwm', false);
-    this.set('steerLeft', 'joy_pwm', false);
-    this.set('steerRight', 'joy_pwm', false);
-    this.set('forward', 'joy_y', false);
-    this.set('reverse', 'joy_y', false);
-    this.set('steerLeft', 'joy_x', false);
-    this.set('steerRight', 'joy_x', false);
-  }
-
-  releaseAll() {
-    this.resetJoystick();
-    for (const [actionName, sources] of this.actionSources.entries()) {
-      if (sources.size > 0) {
-        sources.clear();
-        this._applyActionState(actionName, false);
-      }
-    }
-    this.activeActions.clear();
-  }
-
-  _applyActionState(actionName, isDown) {
-    const def = this.keyDefinitions[actionName];
-    if (!def) return;
-
-    const eventType = isDown ? 'keydown' : 'keyup';
-    if (def.keys) {
-      for (const k of def.keys) {
-        const ev = new KeyboardEvent(eventType, {
-          key: k.key,
-          code: k.code,
-          keyCode: k.keyCode,
-          which: k.keyCode,
-          bubbles: true,
-          cancelable: true
-        });
-        window.dispatchEvent(ev);
-        if (canvas) canvas.dispatchEvent(ev);
-      }
-    }
-
-    if (touchEmulator && touchPadIndex >= 0 && def.gpBtn !== undefined) {
-      try {
-        touchEmulator.PressButton(touchPadIndex, def.gpBtn, isDown ? 1 : 0, isDown);
-      } catch (_) {}
-    }
-  }
-}
-
-const mobileControls = new MobileControlState();
-
-/**
- * ControlStateMachine: Manages explicit GTA III gameplay states:
- * ON_FOOT, DRIVING, DRIVE_BY, SPECIAL_VEHICLE, MENU.
- */
-class ControlStateMachine {
-  constructor() {
-    this.currentState = ControlState.ON_FOOT;
-    this.previousState = null;
-    this.flags = 0;
-    this.nearCar = false;
-  }
-
-  updateFromFlags(flags) {
-    this.flags = flags;
-    const isMenu = !!(flags & (1 << 0));
-    const isCutscene = !!(flags & (1 << 1));
-    const isCar = !!(flags & (1 << 2));
-    const isCarGun = !!(flags & (1 << 4));
-    const isJob = !!(flags & (1 << 5));
-    const isVehGun = !!(flags & (1 << 6));
-
-    let nextState = ControlState.ON_FOOT;
-
-    if (isMenu || isCutscene) {
-      nextState = ControlState.MENU;
-    } else if (isCar) {
-      if (isCarGun) {
-        nextState = ControlState.DRIVE_BY;
-      } else if (isVehGun || isJob) {
-        nextState = ControlState.SPECIAL_VEHICLE;
-      } else {
-        nextState = ControlState.DRIVING;
-      }
-    } else {
-      nextState = ControlState.ON_FOOT;
-    }
-
-    if (nextState !== this.currentState) {
-      this.transitionTo(nextState);
-    }
-
-    this.updateContextualButtons();
-  }
-
-  transitionTo(nextState) {
-    this.previousState = this.currentState;
-    this.currentState = nextState;
-
-    // Reset sprint toggle when transitioning away from on-foot
-    if (nextState !== ControlState.ON_FOOT && typeof window.resetSprintToggle === 'function') {
-      window.resetSprintToggle();
-    }
-
-    // Deterministic cleanup: release all held touch inputs across state transitions
-    mobileControls.releaseAll();
-
-    const rootEl = document.getElementById('touch-controls');
-    if (rootEl) {
-      rootEl.dataset.touchState = nextState;
-      rootEl.dataset.touchStateLower = nextState.toLowerCase();
-    }
-    document.body.dataset.touchState = nextState;
-    document.body.dataset.touchStateLower = nextState.toLowerCase();
-
-    if (nextState === ControlState.MENU) {
-      if (isTouchDevice) disableVirtualPointerLock();
-    } else {
-      if (isTouchDevice) enableVirtualPointerLock();
-    }
-  }
-
-  setNearCar(near) {
-    if (this.nearCar !== near) {
-      this.nearCar = near;
-      this.updateContextualButtons();
-    }
-  }
-
-  updateContextualButtons() {
-    const subMissionBtn = document.getElementById('btn-sub-mission');
-    if (subMissionBtn) {
-      const showJob = (this.currentState === ControlState.DRIVING || this.currentState === ControlState.SPECIAL_VEHICLE) && !!(this.flags & (1 << 5));
-      subMissionBtn.classList.toggle('visible', showJob);
-    }
-
-    const turretFireBtn = document.getElementById('btn-turret-fire');
-    if (turretFireBtn) {
-      const showTurret = (this.currentState === ControlState.SPECIAL_VEHICLE) && !!(this.flags & (1 << 6));
-      turretFireBtn.classList.toggle('visible', showTurret);
-    }
-  }
-}
-
-const controlStateMachine = new ControlStateMachine();
-
-/**
- * Dynamic / Floating Virtual Movement Joystick (Left Thumb, On-Foot)
- */
-function initFloatingJoystick() {
-  const zone = document.getElementById('touch-joystick-zone');
-  const base = document.getElementById('touch-joystick-base');
-  const knob = document.getElementById('touch-joystick-knob');
-  if (!zone || !base || !knob) return;
-
-  let activePointerId = null;
-  let originX = 0;
-  let originY = 0;
-
-  function updateJoystick(clientX, clientY) {
-    const dx = clientX - originX;
-    const dy = clientY - originY;
-    const dist = Math.hypot(dx, dy);
-
-    const maxVisual = 45;
-    const deadzone = 8;
-    const maxRadius = 55;
-
-    const clampedDist = Math.min(dist, maxRadius);
-    const angle = Math.atan2(dy, dx);
-
-    const kx = Math.cos(angle) * (clampedDist / maxRadius) * maxVisual;
-    const ky = Math.sin(angle) * (clampedDist / maxRadius) * maxVisual;
-    knob.style.transform = 'translate(calc(-50% + ' + kx.toFixed(1) + 'px), calc(-50% + ' + ky.toFixed(1) + 'px))';
-
-    if (dist < deadzone) {
-      mobileControls.setJoystick(0, 0);
-      return;
-    }
-
-    const norm = Math.min(1.0, (dist - deadzone) / (maxRadius - deadzone));
-    const nx = Math.cos(angle) * norm;
-    const ny = Math.sin(angle) * norm;
-    mobileControls.setJoystick(nx, ny);
-  }
-
-  function resetJoystick() {
-    activePointerId = null;
-    zone.classList.remove('touching');
-    base.classList.remove('active');
-    base.style.left = '';
-    base.style.top = '';
-    knob.style.transform = 'translate(-50%, -50%)';
-    mobileControls.resetJoystick();
-  }
-
-  zone.addEventListener('pointerdown', (e) => {
-    if (controlStateMachine.currentState !== ControlState.ON_FOOT) return;
-    if (activePointerId !== null) return;
-
-    e.preventDefault();
-    e.stopPropagation();
-
-    activePointerId = e.pointerId;
-    try { zone.setPointerCapture(e.pointerId); } catch (_) {}
-
-    originX = e.clientX;
-    originY = e.clientY;
-
-    base.style.left = originX + 'px';
-    base.style.top = originY + 'px';
-    base.classList.add('active');
-    zone.classList.add('touching');
-
-    updateJoystick(e.clientX, e.clientY);
-  });
-
-  zone.addEventListener('pointermove', (e) => {
-    if (e.pointerId === activePointerId) {
-      e.preventDefault();
-      e.stopPropagation();
-      updateJoystick(e.clientX, e.clientY);
-    }
-  });
-
-  const onEnd = (e) => {
-    if (e.pointerId === activePointerId) {
-      e.preventDefault();
-      e.stopPropagation();
-      try { zone.releasePointerCapture(e.pointerId); } catch (_) {}
-      resetJoystick();
-    }
-  };
-
-  zone.addEventListener('pointerup', onEnd);
-  zone.addEventListener('pointercancel', onEnd);
-  zone.addEventListener('lostpointercapture', onEnd);
-}
-
-/**
- * Touch Camera Orbit Drag Layer
- * Independent touch gestures over the gameplay canvas.
- */
-function initTouchCameraLayer() {
-  const cameraLayer = document.getElementById('touch-camera-layer');
-  if (!cameraLayer) return;
-
-  let lookPointerId = null;
-  let lastX = 0;
-  let lastY = 0;
-
-  cameraLayer.addEventListener('pointerdown', (e) => {
-    if (controlStateMachine.currentState === ControlState.MENU) return;
-    if (lookPointerId !== null) return;
-
-    e.preventDefault();
-    lookPointerId = e.pointerId;
-    lastX = e.clientX;
-    lastY = e.clientY;
-
-    enableVirtualPointerLock();
-    try { cameraLayer.setPointerCapture(e.pointerId); } catch (_) {}
-  });
-
-  cameraLayer.addEventListener('pointermove', (e) => {
-    if (e.pointerId === lookPointerId) {
-      if (controlStateMachine.currentState === ControlState.MENU) return;
-
-      e.preventDefault();
-      const dx = e.clientX - lastX;
-      const dy = e.clientY - lastY;
-      lastX = e.clientX;
-      lastY = e.clientY;
-
-      if (dx === 0 && dy === 0) return;
-      enableVirtualPointerLock();
-
-      const SENSITIVITY_X = 2.0;
-      const SENSITIVITY_Y = 2.0;
-      const movementX = dx * SENSITIVITY_X;
-      const movementY = dy * SENSITIVITY_Y;
-
-      if (canvas) {
-        const mouseEv = new MouseEvent('mousemove', {
-          bubbles: true,
-          cancelable: true,
-          clientX: e.clientX,
-          clientY: e.clientY,
-          movementX: movementX,
-          movementY: movementY
-        });
-        canvas.dispatchEvent(mouseEv);
-      }
-    }
-  });
-
-  const onEnd = (e) => {
-    if (e.pointerId === lookPointerId) {
-      try { cameraLayer.releasePointerCapture(e.pointerId); } catch (_) {}
-      lookPointerId = null;
-    }
-  };
-
-  cameraLayer.addEventListener('pointerup', onEnd);
-  cameraLayer.addEventListener('pointercancel', onEnd);
-  cameraLayer.addEventListener('lostpointercapture', onEnd);
-}
-
-/**
- * Robust Multi-Touch Button Binder
- * Ensures each control captures and releases its own pointer ID independently.
- */
-function bindTouchButton(elementId, actionName, multiActionMap) {
-  const btn = document.getElementById(elementId);
-  if (!btn) return;
-
-  let activePointerId = null;
-
-  const onDown = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (activePointerId !== null) return;
-
-    activePointerId = e.pointerId;
-    try { btn.setPointerCapture(e.pointerId); } catch (_) {}
-    btn.classList.add('active');
-
-    if (multiActionMap) {
-      for (const act of multiActionMap) {
-        mobileControls.set(act, elementId, true);
-      }
-    } else if (actionName) {
-      mobileControls.set(actionName, elementId, true);
-    }
-  };
-
-  const onUp = (e) => {
-    if (e.pointerId === activePointerId) {
-      e.preventDefault();
-      e.stopPropagation();
-      try { btn.releasePointerCapture(e.pointerId); } catch (_) {}
-      activePointerId = null;
-      btn.classList.remove('active');
-
-      if (multiActionMap) {
-        for (const act of multiActionMap) {
-          mobileControls.set(act, elementId, false);
-        }
-      } else if (actionName) {
-        mobileControls.set(actionName, elementId, false);
-      }
-    }
-  };
-
-  btn.addEventListener('pointerdown', onDown);
-  btn.addEventListener('pointerup', onUp);
-  btn.addEventListener('pointercancel', onUp);
-  btn.addEventListener('lostpointercapture', onUp);
-}
-
-/**
- * Memory-based Vehicle Proximity Detection
- * Inspects CWorld::Players and CVehiclePool in WASM memory.
- */
-function checkNearbyVehicle() {
-  try {
-    if (!window.wasmMemory) {
-      if (typeof HEAP32 !== 'undefined') window.wasmMemory = HEAP32.buffer;
-      else if (window.wasmInstance && window.wasmInstance.exports.kg) window.wasmMemory = window.wasmInstance.exports.kg.buffer;
-      else if (window.wasmInstance && window.wasmInstance.exports.memory) window.wasmMemory = window.wasmInstance.exports.memory.buffer;
-    }
-    if (!window.wasmMemory) return false;
-    const h32 = new Int32Array(window.wasmMemory);
-    const hf32 = new Float32Array(window.wasmMemory);
-
-    const pPlayerPed = h32[0x1b33aa8 >> 2];
-    if (!pPlayerPed || pPlayerPed <= 0) return false;
-
-    // Check if player is already inside a vehicle (CPed::m_pMyVehicle at offset 784 = 0x310)
-    const inVehicle = h32[(pPlayerPed + 784) >> 2];
-    if (inVehicle && inVehicle > 0) return false;
-
-    const px = hf32[(pPlayerPed + 48) >> 2];
-    const py = hf32[(pPlayerPed + 52) >> 2];
-    const pz = hf32[(pPlayerPed + 56) >> 2];
-
-    if (isNaN(px) || isNaN(py) || (px === 0 && py === 0)) return false;
-
-    const pVehPool = h32[0x1a99f74 >> 2];
-    if (pVehPool && pVehPool > 0) {
-      let objectsPtr = h32[(pVehPool + 4) >> 2];
-      if (!objectsPtr || objectsPtr < 0x1000) objectsPtr = pVehPool;
-      const poolSize = 110;
-      const stride = 2072;
-
-      for (let i = 0; i < poolSize; i++) {
-        const vehPtr = objectsPtr + (i * stride);
-        if (vehPtr + 60 >= hf32.byteLength) break;
-        const vx = hf32[(vehPtr + 48) >> 2];
-        const vy = hf32[(vehPtr + 52) >> 2];
-        const vz = hf32[(vehPtr + 56) >> 2];
-
-        if (isNaN(vx) || (vx === 0 && vy === 0)) continue;
-
-        const dx = px - vx;
-        const dy = py - vy;
-        const dz = pz - vz;
-        const distSq = dx * dx + dy * dy + dz * dz;
-
-        // 6.5 meters vehicle carjacking entry radius
-        if (distSq < 42.25) {
-          return true;
-        }
-      }
-    }
-  } catch (_) {}
-  return false;
-}
-
-let proximityInterval = null;
-function startProximityLoop() {
-  if (proximityInterval) clearInterval(proximityInterval);
-  proximityInterval = setInterval(() => {
-    if (controlStateMachine.currentState === ControlState.ON_FOOT) {
-      const isNear = checkNearbyVehicle();
-      controlStateMachine.setNearCar(isNear);
-    }
-  }, 150);
-}
-
-const activeTouchPointers = new Set();
-window.addEventListener('pointerdown', (e) => activeTouchPointers.add(e.pointerId), true);
-window.addEventListener('pointerup', (e) => activeTouchPointers.delete(e.pointerId), true);
-window.addEventListener('pointercancel', (e) => activeTouchPointers.delete(e.pointerId), true);
-
-/**
- * Developer Debug HUD (?touchdebug=1)
- */
-function initTouchDebugHud() {
-  const hasTouchDebug = new URLSearchParams(window.location.search).get('touchdebug') === '1';
-  if (!hasTouchDebug) return;
-
-  const hud = document.getElementById('touch-debug-hud');
-  if (hud) hud.classList.add('visible');
-
-  setInterval(() => {
-    const dbgState = document.getElementById('dbg-state');
-    const dbgPointers = document.getElementById('dbg-pointers');
-    const dbgJoy = document.getElementById('dbg-joy');
-    const dbgNear = document.getElementById('dbg-near-car');
-    const dbgActions = document.getElementById('dbg-actions');
-
-    if (dbgState) dbgState.textContent = controlStateMachine.currentState;
-    if (dbgPointers) dbgPointers.textContent = activeTouchPointers.size;
-    if (dbgJoy) dbgJoy.textContent = mobileControls.joyX.toFixed(2) + ', ' + mobileControls.joyY.toFixed(2);
-    if (dbgNear) dbgNear.textContent = controlStateMachine.nearCar ? 'YES' : 'NO';
-    if (dbgActions) {
-      const actArr = Array.from(mobileControls.activeActions);
-      dbgActions.textContent = actArr.length > 0 ? actArr.join(', ') : 'none';
-    }
-  }, 100);
-}
+let touchPadIndex = 0;
 
 /* Authoritative C++ Game State Bitmask Handler */
 const TOUCH_STATE_BITS = [
@@ -2103,17 +1419,25 @@ function setTouchState(flags) {
   for (const [bit, name] of TOUCH_STATE_BITS) {
     ds[name] = (flags & bit) ? '1' : '0';
   }
-
-  controlStateMachine.updateFromFlags(flags);
 }
 
 function setTouchDownloadState(on) {
   document.body.dataset.stateDownload = on ? '1' : '0';
 }
 
-/**
- * Master Touch Controller Installer
- */
+function releaseAllTouchInputs() {
+  if (touchEmulator && touchPadIndex !== null) {
+    try {
+      for (let i = 0; i < 16; i++) {
+        touchEmulator.PressButton(touchPadIndex, i, 0, false);
+      }
+      for (let a = 0; a < 4; a++) {
+        touchEmulator.MoveAxis(touchPadIndex, a, 0);
+      }
+    } catch (_) {}
+  }
+}
+
 function installTouchControls() {
   if (!isTouchDevice) {
     document.body.dataset.isTouch = '0';
@@ -2122,103 +1446,143 @@ function installTouchControls() {
   }
 
   document.body.dataset.isTouch = '1';
+  document.body.classList.add('gameIsStarted');
+  document.body.classList.add('game-started');
 
-  if (typeof GamepadEmulator === 'function' && !touchEmulator) {
+  if (typeof GamepadEmulator !== 'function') {
+    console.warn('[regta3] GamepadEmulator class not found on window');
+    return;
+  }
+
+  if (!touchEmulator) {
     try {
       touchEmulator = new GamepadEmulator();
-      const pad = touchEmulator.AddEmulatedGamepad(null, true);
+      const pad = touchEmulator.AddEmulatedGamepad(0, true);
       if (pad) touchPadIndex = pad.index;
     } catch (err) {
-      console.warn('[regta3] GamepadEmulator:', err && err.message ? err.message : err);
+      console.warn('[regta3] GamepadEmulator init:', err && err.message ? err.message : err);
     }
   }
 
-  initFloatingJoystick();
-  initTouchCameraLayer();
+  const moveEl = document.getElementById('move');
+  const lookEl = document.getElementById('look');
+  const joyBase = document.getElementById('touch-joystick-base');
+  const joyKnob = document.getElementById('touch-joystick-knob');
 
-  // Top bar action buttons
-  bindTouchButton('btn-touch-home', 'menu');
-  bindTouchButton('btn-touch-camera', 'camera');
+  if (moveEl) {
+    let movePointerId = -1;
+    let startX = 0, startY = 0;
 
-  // On foot action buttons
-  bindTouchButton('btn-attack', 'attack');
-  bindTouchButton('btn-jump', 'jump');
-  bindTouchButton('btn-enter-car', 'enterExit');
+    moveEl.addEventListener('pointerdown', (e) => {
+      movePointerId = e.pointerId;
+      startX = e.clientX;
+      startY = e.clientY;
+      if (joyBase) {
+        joyBase.style.left = startX + 'px';
+        joyBase.style.top = startY + 'px';
+        joyBase.classList.add('active');
+      }
+      if (joyKnob) {
+        joyKnob.style.transform = 'translate3d(0, 0, 0)';
+      }
+    }, { capture: true });
 
-  // Sprint Button Toggle: tap once to enable and keep running; tap again to disable
-  const btnSprint = document.getElementById('btn-sprint');
-  if (btnSprint) {
-    let isSprinting = false;
-
-    function setSprintToggle(on) {
-      isSprinting = on;
-      btnSprint.classList.toggle('toggle-active', on);
-      btnSprint.classList.toggle('active', on);
-      mobileControls.set('sprint', 'btn-sprint-toggle', on);
-    }
-
-    window.resetSprintToggle = () => {
-      if (isSprinting) setSprintToggle(false);
+    const onMoveUpdate = (e) => {
+      if (e.pointerId === movePointerId && joyKnob) {
+        const dx = e.clientX - startX;
+        const dy = e.clientY - startY;
+        const dist = Math.hypot(dx, dy);
+        const maxDist = 45;
+        const clampedDist = Math.min(dist, maxDist);
+        const angle = Math.atan2(dy, dx);
+        const kx = Math.cos(angle) * clampedDist;
+        const ky = Math.sin(angle) * clampedDist;
+        joyKnob.style.transform = `translate3d(${kx}px, ${ky}px, 0)`;
+      }
     };
 
-    btnSprint.addEventListener('pointerdown', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      setSprintToggle(!isSprinting);
-    });
+    const onMoveEnd = (e) => {
+      if (e.pointerId === movePointerId) {
+        movePointerId = -1;
+        if (joyBase) joyBase.classList.remove('active');
+        if (joyKnob) joyKnob.style.transform = 'translate3d(0, 0, 0)';
+      }
+    };
+
+    document.addEventListener('pointermove', onMoveUpdate);
+    document.addEventListener('pointerup', onMoveEnd);
+    document.addEventListener('pointercancel', onMoveEnd);
+
+    const moveConfig = {
+      directions: { up: true, down: true, left: true, right: true },
+      dragDistance: 80,
+      tapTarget: moveEl,
+      lockTargetWhilePressed: true,
+      xAxisIndex: 0,
+      yAxisIndex: 1,
+      swapAxes: false,
+      invertX: false,
+      invertY: false,
+    };
+    touchEmulator.AddDisplayJoystickEventListeners(touchPadIndex, [moveConfig]);
   }
 
-  // Driving controls
-  bindTouchButton('btn-steer-left', 'steerLeft');
-  bindTouchButton('btn-steer-right', 'steerRight');
-  bindTouchButton('btn-pedal-gas', 'pedalGas');
-  bindTouchButton('btn-pedal-brake', 'pedalBrake');
-  bindTouchButton('btn-handbrake', 'handbrake');
-  bindTouchButton('btn-horn', 'horn');
-  bindTouchButton('btn-exit-car', 'enterExit');
-
-  // Contextual Drive-by controls
-  bindTouchButton('btn-driveby-left', null, ['lookLeft', 'attack']);
-  bindTouchButton('btn-driveby-right', null, ['lookRight', 'attack']);
-  bindTouchButton('btn-driveby-right-alt', null, ['lookRight', 'attack']);
-
-  // Contextual Special Vehicle controls
-  bindTouchButton('btn-sub-mission', 'job');
-
-  // Contextual Weapon Cycle Tap Zone (Top right HUD)
-  const wpZone = document.getElementById('touch-weapon-cycle');
-  if (wpZone) {
-    wpZone.addEventListener('pointerdown', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      mobileControls.tap('weaponNext');
-    });
+  if (lookEl) {
+    const lookConfig = {
+      directions: { up: true, down: true, left: true, right: true },
+      dragDistance: 80,
+      tapTarget: lookEl,
+      lockTargetWhilePressed: true,
+      xAxisIndex: 2,
+      yAxisIndex: 3,
+      swapAxes: false,
+      invertX: false,
+      invertY: false,
+    };
+    touchEmulator.AddDisplayJoystickEventListeners(touchPadIndex, [lookConfig]);
   }
+
+  // Bind All Touch Control Buttons (1:1 with ze-man/gta-3)
+  const buttonConfigs = [
+    { buttonIndex: 9, tapTarget: document.querySelector('.touch-control.menu') },
+    { buttonIndex: 3, tapTarget: document.querySelector('.touch-control.car.getIn') },
+    { buttonIndex: 0, tapTarget: document.querySelector('.touch-control.run') },
+    { buttonIndex: 1, tapTarget: document.querySelector('.touch-control.fist') },
+    { buttonIndex: 5, tapTarget: document.querySelector('.touch-control.drift') },
+    { buttonIndex: 2, tapTarget: document.querySelector('.touch-control.jump') },
+    { buttonIndex: 4, tapTarget: document.querySelector('.touch-control.mobile') },
+    { buttonIndex: 11, tapTarget: document.querySelector('.touch-control.job') },
+    { buttonIndex: 4, tapTarget: document.querySelector('.touch-control.radio') },
+    { buttonIndex: 7, tapTarget: document.querySelector('.touch-control.weapon') },
+    { buttonIndex: 8, tapTarget: document.querySelector('.touch-control.camera') },
+    { buttonIndex: 10, tapTarget: document.querySelector('.touch-control.horn') },
+    { buttonIndex: 7, buttonIndexes: [1, 7], tapTarget: document.querySelector('.touch-control.fireRight') },
+    { buttonIndex: 6, buttonIndexes: [1, 6], tapTarget: document.querySelector('.touch-control.fireLeft') },
+  ];
+
+  touchEmulator.AddDisplayButtonEventListeners(touchPadIndex, buttonConfigs);
+
+  // Safety release on blur / hidden
+  window.addEventListener('blur', releaseAllTouchInputs);
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) releaseAllTouchInputs();
+  });
 
   initMenuTouchClickSupport();
-  startProximityLoop();
-  initTouchDebugHud();
-  controlStateMachine.transitionTo(ControlState.ON_FOOT);
-
-  // Safety cleanup: release all touch controls when window loses focus
-  window.addEventListener('blur', () => mobileControls.releaseAll());
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden) mobileControls.releaseAll();
-  });
 
   // Responsive orientation handler
   function checkOrientation() {
     const warning = document.getElementById('touch-portrait-warning');
     if (warning) {
       const isPortrait = window.innerHeight > window.innerWidth;
-      warning.style.display = isPortrait ? 'flex' : 'none';
+      warning.style.display = (isPortrait && isTouchDevice) ? 'flex' : 'none';
     }
   }
   window.addEventListener('resize', checkOrientation);
   window.addEventListener('orientationchange', checkOrientation);
   checkOrientation();
 
-  console.log('[regta3] GTA III 10th Anniversary Mobile Controls initialized successfully');
+  console.log('[regta3] ze-man GamepadEmulator mobile controls initialized successfully (Method=1)');
 }
 
 /**
@@ -2234,7 +1598,7 @@ function initMenuTouchClickSupport() {
   let menuTouchStart = null;
 
   window.addEventListener('pointerdown', (e) => {
-    const isMenu = (controlStateMachine.currentState === ControlState.MENU) || (document.body.dataset.stateMenu === '1');
+    const isMenu = (document.body.dataset.stateMenu === '1');
     if (!isMenu) return;
     if (e.target !== canvasEl && e.target !== document.body && !e.target.closest('#canvas-container')) return;
 
@@ -2251,7 +1615,7 @@ function initMenuTouchClickSupport() {
     const start = menuTouchStart;
     menuTouchStart = null;
 
-    const isMenu = (controlStateMachine.currentState === ControlState.MENU) || (document.body.dataset.stateMenu === '1');
+    const isMenu = (document.body.dataset.stateMenu === '1');
     if (!isMenu) return;
 
     const dx = e.clientX - start.x;
